@@ -10,11 +10,7 @@ Gracias a **Norrisplay** por descubrirme el juego, por hacer cada día más entr
 
 
 
-#### ☕ Apoya el proyecto
 
-Si te gusta este proyecto y quieres apoyarlo, puedes hacerlo aquí:
-
-👉 https://www.paypal.com/paypalme/Danielpolopradanos
 
 # Pitipen Mining System — Release Notes
 
@@ -29,14 +25,6 @@ Thanks to **Norrisplay** for introducing me to the game, making every day more e
 
 👉 https://www.twitch.tv/norrisplay
 
----
-
-#### ☕ Support the project
-
-If you like this project and want to support it, you can do it here:
-
-👉 https://www.paypal.com/paypalme/Danielpolopradanos
----
 
 ## 🇪🇸 Español
 
@@ -136,7 +124,11 @@ No es necesario esperar a una nueva versión del instalador para mantener la bas
 Creado por **[danypolo](https://discord.com/users/danypolo)** — contacto vía Discord.  
 Si encuentras un error o quieres proponer una mejora, abre un [Issue](../../issues) en este repositorio.
 
----
+#### ☕ Apoya el proyecto
+
+Si te gusta este proyecto y quieres apoyarlo, puedes hacerlo aquí:
+
+👉 https://www.paypal.com/paypalme/Danielpolopradanos
 ---
 
 ## 🇬🇧 English
@@ -230,7 +222,11 @@ No new installer version is needed to keep the database up to date.
 - On monitors with display scaling above 125%, the OCR may need recalibration after changing the scale.
 - In exclusive full-screen mode the overlay may be hidden beneath the game; borderless windowed mode is recommended.
 
----
+#### ☕ Support the project
+
+If you like this project and want to support it, you can do it here:
+
+👉 https://www.paypal.com/paypalme/Danielpolopradanos
 
 #### 💬 Contact and support
 
