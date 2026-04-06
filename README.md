@@ -1,5 +1,41 @@
+---
+
+#### 🙌 Agradecimientos
+
+En agradecimiento a una de las mejores comunidades de Twitch:
+
+Gracias a **Norrisplay** por descubrirme el juego, por hacer cada día más entretenido con cada transmisión y por crear una comunidad hispana donde compartir esta experiencia.
+
+👉 https://www.twitch.tv/norrisplay
+
+---
+
+#### ☕ Apoya el proyecto
+
+Si te gusta este proyecto y quieres apoyarlo, puedes hacerlo aquí:
+
+👉 https://www.paypal.com/paypalme/Danielpolopradanos
+
 # Pitipen Mining System — Release Notes
 
+
+---
+
+#### 🙌 Acknowledgements
+
+Special thanks to one of the best Twitch communities:
+
+Thanks to **Norrisplay** for introducing me to the game, making every day more enjoyable with each stream, and building a great Spanish-speaking community.
+
+👉 https://www.twitch.tv/norrisplay
+
+---
+
+#### ☕ Support the project
+
+If you like this project and want to support it, you can do it here:
+
+👉 https://www.paypal.com/paypalme/Danielpolopradanos
 ---
 
 ## 🇪🇸 Español
