@@ -1,5 +1,5 @@
 {
-  "version": "1.5",
+  "version": "1.4",
   "changes": [
     "Sistema de OCR mejorado y más estable",
     "Añadida sensibilidad configurable del OCR",
