@@ -1,0 +1,12 @@
+{
+  "version": "1.4",
+  "changes": [
+    "Sistema de OCR mejorado y más estable",
+    "Añadida sensibilidad configurable del OCR",
+    "Hotkeys globales para calibración",
+    "Eliminado aviso previo al calibrar",
+    "Mejor comportamiento tras Alt+Tab",
+    "Corrección de errores menores"
+  ],
+  "url": "https://github.com/danypolo/pitipen-mining-system/releases/latest"
+}
