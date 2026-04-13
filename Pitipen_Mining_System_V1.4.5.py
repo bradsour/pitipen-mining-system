@@ -14,6 +14,7 @@ Pitipen Mining System
 import csv
 import json
 import base64
+import difflib
 import os
 import re
 import sqlite3
@@ -82,6 +83,7 @@ else:
     _BASE_DIR = Path(_os.path.dirname(_os.path.abspath(__file__)))
 
 CONFIG_FILE = _BASE_DIR / "config.json"
+ROCK_CONFIG_FILE = _BASE_DIR / "rock_config.json"
 CSV_FILE = _BASE_DIR / "Minerales.csv"
 PREFS_FILE = _BASE_DIR / "preferences.json"
 UEX_DB_FILE = _BASE_DIR / "uex_cache.sqlite3"
@@ -221,6 +223,12 @@ TEXTS = {
     "ship_mining":{"es":"Minería con nave","en":"Ship mining","fr":"Minage en vaisseau","de":"Schiffsbergbau","ru":"Корабельная добыча"},
     "hand_mining":{"es":"Minería en Superficie","en":"Surface mining","fr":"Minage de surface","de":"Oberflächenbergbau","ru":"Добыча на поверхности"},
     "salvage":{"es":"Chatarrería","en":"Salvage","fr":"Récupération","de":"Bergung","ru":"Сальваж"},
+    "rock":{"label_key":"rock_details","fallback":"Rock details","color":TEXT},
+    "rock_details":{"es":"Detalles de roca","en":"Rock details","fr":"D?tails de roche","de":"Gesteinsdetails","ru":"Rock details"},
+    "calibrate_rock":{"es":"? CALIBRAR ROCA","en":"? CALIBRATE ROCK","fr":"? CALIBRER ROCHER","de":"? GESTEIN KALIBRIEREN","ru":"? CALIBRATE ROCK"},
+    "rock_panel":{"es":"ROCA","en":"ROCK","fr":"ROCHE","de":"GESTEIN","ru":"ROCK"},
+    "rock_missing_calibration":{"es":"Calibra la zona de roca antes de iniciar este modo.","en":"Calibrate the rock panel area before starting this mode.","fr":"Calibrez la zone de roche avant de d?marrer ce mode.","de":"Kalibriere den Gesteinsbereich, bevor du diesen Modus startest.","ru":"Calibrate the rock panel area before starting this mode."},
+    "rock_scanning":{"es":"Escaneando roca...","en":"Scanning rock...","fr":"Analyse de la roche...","de":"Gestein wird gescannt...","ru":"Scanning rock..."},
     "possible_materials":{"es":"Materiales posibles:","en":"Possible materials:","fr":"Matériaux possibles :","de":"Mögliche Materialien:","ru":"Возможные материалы:"},
     "contains":{"es":"Contiene:","en":"Contains:","fr":"Contient :","de":"Enthält:","ru":"Содержит:"},
     "history_duration":{"es":"Duración mensajes (s)","en":"Message duration (s)","fr":"Durée des messages (s)","de":"Nachrichtendauer (s)","ru":"Длительность сообщений (с)"},
@@ -230,6 +238,14 @@ TEXTS = {
     "preview_raw":{"es":"OCR Preview","en":"OCR Preview","fr":"OCR Preview","de":"OCR Preview","ru":"OCR Preview"},
     "preview_processed":{"es":"Imagen procesada","en":"Processed Image","fr":"Image trait?e","de":"Verarbeitetes Bild","ru":"Processed Image"},
     "verify_candidates": {"es":"Verificar candidatos","en":"Verify candidates","fr":"V?rifier candidats","de":"Kandidaten pr?fen","ru":"Verify candidates"},
+    "rock_preview":{"es":"Vista previa roca","en":"Rock OCR preview","fr":"Aper?u OCR roche","de":"Gestein OCR Vorschau","ru":"Rock OCR preview"},
+    "rock_boxes":{"es":"Mostrar cajas","en":"Draw boxes","fr":"Afficher cadres","de":"Boxen anzeigen","ru":"Draw boxes"},
+    "rock_ocr_mode":{"es":"Modo OCR roca","en":"Rock OCR mode","fr":"Mode OCR roche","de":"Rock OCR Modus","ru":"Rock OCR mode"},
+    "rock_ocr_gray":{"es":"Gris","en":"Gray","fr":"Gris","de":"Grau","ru":"Gray"},
+    "rock_ocr_bright":{"es":"Brillante","en":"Bright","fr":"Brillant","de":"Hell","ru":"Bright"},
+    "rock_ocr_adaptive":{"es":"Adaptativo","en":"Adaptive","fr":"Adaptatif","de":"Adaptiv","ru":"Adaptive"},
+    "rock_ocr_color":{"es":"Color","en":"Color","fr":"Couleur","de":"Farbe","ru":"Color"},
+    "rock_preview_zoom":{"es":"Zoom vista roca","en":"Rock preview zoom","fr":"Zoom aper?u roche","de":"Gestein Vorschau Zoom","ru":"Rock preview zoom"},
     "calibration_hotkey":{"es":"Atajo calibración","en":"Calibration hotkey","fr":"Raccourci calibration","de":"Kalibrierungs-Hotkey","ru":"Горячая клавиша калибровки"},
     "hotkey_saved":{"es":"Atajo guardado","en":"Hotkey saved","fr":"Raccourci enregistré","de":"Hotkey gespeichert","ru":"Горячая клавиша сохранена"},
     "hotkeys_unavailable":{"es":"Hotkeys no disponibles","en":"Hotkeys unavailable","fr":"Raccourcis indisponibles","de":"Hotkeys nicht verfügbar","ru":"Горячие клавиши недоступны"},
@@ -481,11 +497,61 @@ def _build_tess_config(oem=1):
     parts.append("-c tessedit_char_whitelist=0123456789")
     return " ".join(parts)
 
+def _build_tess_config_text(oem=1):
+    parts = []
+    if TESSDATA_DIR:
+        safe_tessdata = Path(TESSDATA_DIR).as_posix()
+        parts.append(f'--tessdata-dir {safe_tessdata}')
+    parts.append("--psm 6")
+    parts.append(f"--oem {oem}")
+    parts.append("-c preserve_interword_spaces=1")
+    parts.append("-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.%():- ")
+    return " ".join(parts)
+
+def _build_tess_config_name(oem=1):
+    parts = []
+    if TESSDATA_DIR:
+        safe_tessdata = Path(TESSDATA_DIR).as_posix()
+        parts.append(f'--tessdata-dir {safe_tessdata}')
+    parts.append("--psm 7")
+    parts.append(f"--oem {oem}")
+    parts.append("-c preserve_interword_spaces=1")
+    parts.append("-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz() ")
+    return " ".join(parts)
+
+def _build_tess_config_numeric(oem=1):
+    parts = []
+    if TESSDATA_DIR:
+        safe_tessdata = Path(TESSDATA_DIR).as_posix()
+        parts.append(f'--tessdata-dir {safe_tessdata}')
+    parts.append("--psm 6")
+    parts.append(f"--oem {oem}")
+    parts.append("-c preserve_interword_spaces=1")
+    parts.append("-c tessedit_char_whitelist=0123456789.%SCU,")
+    return " ".join(parts)
+
+def _build_tess_config_quality(oem=1, psm=6):
+    parts = []
+    if TESSDATA_DIR:
+        safe_tessdata = Path(TESSDATA_DIR).as_posix()
+        parts.append(f'--tessdata-dir {safe_tessdata}')
+    parts.append(f"--psm {psm}")
+    parts.append(f"--oem {oem}")
+    parts.append("-c preserve_interword_spaces=1")
+    parts.append("-c tessedit_char_whitelist=0123456789")
+    return " ".join(parts)
+
 # CORRECCIÓN 2: usar solo LSTM (--oem 1).
 # El fallback legacy (--oem 0) se desactiva porque suele fallar
 # cuando el paquete de idiomas no incluye los datos del motor clásico.
 TESS_CONFIG      = _build_tess_config(1)
 TESS_CONFIG_FALL = TESS_CONFIG
+ROCK_TESS_CONFIG = _build_tess_config_text(1)
+ROCK_NAME_TESS_CONFIG = _build_tess_config_name(1)
+ROCK_NUM_TESS_CONFIG = _build_tess_config_numeric(1)
+ROCK_QUALITY_TESS_CONFIG = _build_tess_config_quality(1, 6)
+ROCK_QUALITY_TESS_CONFIG_SPARSE = _build_tess_config_quality(1, 11)
+ROCK_QUALITY_TESS_CONFIG_LINE = _build_tess_config_quality(1, 7)
 
 try:
     v = pytesseract.get_tesseract_version()
@@ -555,6 +621,36 @@ def save_preview_mode(mode):
 def load_verify_enabled(): return bool(load_prefs().get("__verify_enabled__", False))
 def save_verify_enabled(enabled):
     prefs = load_prefs(); prefs["__verify_enabled__"] = bool(enabled); save_prefs(prefs)
+
+def load_rock_preview_enabled(): return bool(load_prefs().get("__rock_preview_enabled__", False))
+def save_rock_preview_enabled(enabled):
+    prefs = load_prefs(); prefs["__rock_preview_enabled__"] = bool(enabled); save_prefs(prefs)
+
+def load_rock_boxes_enabled(): return bool(load_prefs().get("__rock_boxes_enabled__", False))
+def save_rock_boxes_enabled(enabled):
+    prefs = load_prefs(); prefs["__rock_boxes_enabled__"] = bool(enabled); save_prefs(prefs)
+
+ROCK_OCR_MODES = ["gray", "bright", "adaptive", "color"]
+def load_rock_ocr_mode():
+    val = str(load_prefs().get("__rock_ocr_mode__", "gray")).lower()
+    return val if val in ROCK_OCR_MODES else "gray"
+def save_rock_ocr_mode(mode):
+    mode = str(mode).lower()
+    prefs = load_prefs(); prefs["__rock_ocr_mode__"] = mode if mode in ROCK_OCR_MODES else "gray"; save_prefs(prefs)
+
+def load_rock_preview_zoom():
+    try:
+        val = float(load_prefs().get("__rock_preview_zoom__", 1.0))
+    except Exception:
+        val = 1.0
+    return max(1.0, min(10.0, val))
+def save_rock_preview_zoom(value):
+    try:
+        v = float(value)
+    except Exception:
+        v = 1.0
+    v = max(1.0, min(10.0, v))
+    prefs = load_prefs(); prefs["__rock_preview_zoom__"] = v; save_prefs(prefs)
 
 def load_history_duration():
     try:
@@ -700,6 +796,7 @@ MODE_INFO = {
     "material":{"label_key":"ship_mining","fallback":"Minería con nave","color":GREEN},
     "hand":{"label_key":"hand_mining","fallback":"Minería en Superficie","color":GOLD},
     "salvage":{"label_key":"salvage","fallback":"Chatarrería","color":RED},
+    "rock":{"label_key":"rock_details","fallback":"Rock details","color":TEXT},
 }
 BASE_SIGNATURES = {"asteroid":{1700,1720,1750,1850,1870,1900},"hand":{3000,4000},"salvage":{2000}}
 
@@ -919,6 +1016,422 @@ def _read_number_internal(img, lookup, active_modes):
 def read_number(img, lookup, active_modes):
     value, _, _ = _read_number_internal(img, lookup, active_modes)
     return value
+
+
+def _clean_lines(text):
+    lines = []
+    for raw in text.splitlines():
+        s = re.sub(r"\s+", " ", raw).strip()
+        if s:
+            lines.append(s)
+    return lines
+
+def _parse_stat_value(line, key):
+    m = re.search(rf"{key}\\s*[:]?\\s*([0-9.,]+\\s*(?:%|SCU)?)", line, re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+def _normalize_num(s):
+    return s.replace(",", ".").strip()
+
+def _clean_quality_token(s):
+    # Fix common OCR confusions in quality column
+    if not s:
+        return ""
+    rep = (s.upper()
+           .replace("O", "0")
+           .replace("I", "1")
+           .replace("L", "1")
+           .replace("S", "5")
+           .replace("B", "8")
+           .replace("G", "6")
+           .replace("Z", "2"))
+    m = re.findall(r"\d{1,4}", rep)
+    if not m:
+        return ""
+    # Prefer last 3-4 digits if available
+    for tok in reversed(m):
+        if len(tok) >= 3:
+            return tok
+    return m[-1]
+
+def _rock_preprocess(img, mode):
+    if mode == "bright":
+        return preprocess_bright(img)
+    if mode == "adaptive":
+        return preprocess_adaptive(img)
+    if mode == "color":
+        return preprocess_support_color(img)
+    return preprocess_gray(img)
+
+def _rock_preprocess_preview(img, mode):
+    # Same pipelines as OCR, but WITHOUT upscaling for 1:1 preview
+    if mode == "bright":
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        gray = cv2.convertScaleAbs(gray, alpha=1.6, beta=18)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    if mode == "adaptive":
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.bilateralFilter(gray, 5, 35, 35)
+        binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY, 31, -2)
+        return cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8))
+    if mode == "color":
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask_low_sat = cv2.inRange(hsv, np.array([0, 0, 125]), np.array([180, 120, 255]))
+        v = hsv[:, :, 2]
+        _, mask_bright = cv2.threshold(v, 150, 255, cv2.THRESH_BINARY)
+        mask = cv2.bitwise_or(mask_low_sat, mask_bright)
+        return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    return preprocess_gray(img)
+
+def _ocr_rock_name(img, ocr_mode="gray"):
+    try:
+        proc = _rock_preprocess(img, ocr_mode)
+        if len(proc.shape) == 3:
+            proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        text = pytesseract.image_to_string(proc, config=ROCK_NAME_TESS_CONFIG).strip()
+        lines = _clean_lines(text)
+        return lines[0] if lines else ""
+    except Exception as e:
+        _ocr_log(f"[rock] name ocr exception: {e}")
+        return ""
+
+def _ocr_rock_numeric(img, ocr_mode="gray"):
+    try:
+        proc = _rock_preprocess(img, ocr_mode)
+        if len(proc.shape) == 3:
+            proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        text = pytesseract.image_to_string(proc, config=ROCK_NUM_TESS_CONFIG).strip()
+        return text
+    except Exception as e:
+        _ocr_log(f"[rock] numeric ocr exception: {e}")
+        return ""
+
+def _ocr_rock_quality(img, ocr_mode="gray", psm_line=False):
+    try:
+        proc = _rock_preprocess(img, ocr_mode)
+        if len(proc.shape) == 3:
+            proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        cfg = ROCK_QUALITY_TESS_CONFIG_LINE if psm_line else ROCK_QUALITY_TESS_CONFIG
+        text = pytesseract.image_to_string(proc, config=cfg).strip()
+        if not text:
+            text = pytesseract.image_to_string(proc, config=ROCK_QUALITY_TESS_CONFIG_SPARSE).strip()
+        return text
+    except Exception as e:
+        _ocr_log(f"[rock] quality ocr exception: {e}")
+        return ""
+
+def parse_rock_details(img, ocr_mode="gray"):
+    """
+    Extracts rock details from a single captured panel.
+    Returns (data_dict, raw_text) or (None, raw_text) if not confident.
+    """
+    try:
+        proc = _rock_preprocess(img, ocr_mode)
+        if len(proc.shape) == 2:
+            proc_for_ocr = proc
+        else:
+            proc_for_ocr = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        text = pytesseract.image_to_string(proc_for_ocr, config=ROCK_TESS_CONFIG).strip()
+        lines = _clean_lines(text)
+        if not lines:
+            return None, text
+
+        upper_lines = [l.upper() for l in lines]
+        name = None
+        try:
+            h, w = img.shape[:2]
+            boxes = rock_boxes_for_shape(h, w)
+            x1, y1, x2, y2 = boxes.get("name", (0, 0, w, h))
+            name_crop = img[y1:y2, x1:x2]
+            name = _ocr_rock_name(name_crop, ocr_mode)
+        except Exception:
+            name = None
+        if not name:
+            if "RESULTS" in upper_lines[0]:
+                for l in lines[1:4]:
+                    if l and not any(k in l.upper() for k in ("MASS", "RES", "INST", "COMP", "%")):
+                        name = l.strip()
+                        break
+        if not name:
+            for l in lines:
+                u = l.upper()
+                if "(" in u and ")" in u and not any(k in u for k in ("MASS", "RES", "INST", "COMP", "%")):
+                    name = l.strip()
+                    break
+
+        mass = None
+        res = None
+        inst = None
+        comp = None
+
+        # OCR numeric crops for stats/comp/table to improve accuracy
+        stats_text = ""
+        comp_text = ""
+        table_text = ""
+        quality_text = ""
+        try:
+            h, w = img.shape[:2]
+            boxes = rock_boxes_for_shape(h, w)
+            sx1, sy1, sx2, sy2 = boxes.get("stats", (0, 0, w, h))
+            cx1, cy1, cx2, cy2 = boxes.get("comp", (0, 0, w, h))
+            tx1, ty1, tx2, ty2 = boxes.get("table", (0, 0, w, h))
+            stats_text = _ocr_rock_numeric(img[sy1:sy2, sx1:sx2], ocr_mode)
+            comp_text = _ocr_rock_numeric(img[cy1:cy2, cx1:cx2], ocr_mode)
+            table_img = img[ty1:ty2, tx1:tx2]
+            table_text = _ocr_rock_numeric(table_img, ocr_mode)
+            # Quality column: take a right-justified narrow slice
+            qw = max(1, int((tx2 - tx1) * 0.18))
+            qx1 = max(tx1, tx2 - qw)
+            quality_text = _ocr_rock_quality(img[ty1:ty2, qx1:tx2], ocr_mode)
+        except Exception:
+            pass        # Parse stats by row order: MASS, RES, INST
+        stat_lines = _clean_lines(stats_text)
+        stat_nums = []
+        for l in stat_lines:
+            nums = re.findall(r"\d+(?:[\.,]\d+)?", l)
+            stat_nums.append(nums)
+
+        if len(stat_nums) >= 1 and mass is None:
+            for n in stat_nums[0]:
+                if n.isdigit() and 3 <= len(n) <= 6:
+                    mass = n
+                    break
+            if mass is None and stat_nums[0]:
+                mass = _normalize_num(stat_nums[0][0])
+
+        if len(stat_nums) >= 2 and res is None:
+            if stat_nums[1]:
+                res = _normalize_num(stat_nums[1][0]) + "%"
+
+        if len(stat_nums) >= 3 and inst is None:
+            if stat_nums[2]:
+                inst = _normalize_num(stat_nums[2][0])
+
+        # If RES line has no numbers (often OCRs as just 'S'), treat as 0%
+        if res is None and len(stat_nums) >= 2:
+            if not stat_nums[1]:
+                res = "0%"
+
+        # Parse comp from comp_text
+        if comp is None and text:
+            m = re.search(r"(\d+(?:[\.,]\d+)?)\s*SCU", text.upper())
+            if m:
+                comp = _normalize_num(m.group(1)) + " SCU"
+
+        if comp is None:
+            for l in _clean_lines(comp_text):
+                u = l.upper()
+                m = re.search(r"(\d+(?:[\.,]\d+)?)\s*SCU", u)
+                if m:
+                    comp = _normalize_num(m.group(1)) + " SCU"
+                    break
+
+        if comp is None and comp_text:
+            nums = re.findall(r"\d+(?:[\.,]\d+)?", comp_text)
+            if nums:
+                comp = _normalize_num(nums[0]) + " SCU"
+
+        quality_lines = []
+        if quality_text:
+            for l in _clean_lines(quality_text):
+                tok = _clean_quality_token(l)
+                if tok:
+                    quality_lines.append(tok)
+
+        # If quality crop failed, try per-row right-slice OCR from the table image
+        if not quality_lines and 'table_img' in locals():
+            source_lines_tmp = _clean_lines(table_text) if table_text else []
+            row_count = len([l for l in source_lines_tmp if '%' in l]) or 0
+            if row_count > 0:
+                th, tw = table_img.shape[:2]
+                slice_w = max(1, int(tw * 0.25))
+                for i in range(row_count):
+                    y0 = int(i * th / row_count)
+                    y1 = int((i + 1) * th / row_count)
+                    row_img = table_img[y0:y1, tw - slice_w:tw]
+                    qtxt = _ocr_rock_quality(row_img, ocr_mode, psm_line=True)
+                    tok = _clean_quality_token(qtxt)
+                    if tok:
+                        quality_lines.append(tok)
+
+        rows = []
+        row_re = re.compile(r"(\d+(?:[.,]\d+)?)\s*%\s*([A-Z0-9 ()/\-]+?)(?:\s+(\d{1,4}))?\s*$", re.IGNORECASE)
+        if table_text:
+            source_lines = [s.strip() for s in table_text.replace("\n", " ").split("|") if s.strip()]
+        else:
+            source_lines = lines
+        for idx, l in enumerate(source_lines):
+            u = l.upper()
+            if "%" not in u:
+                continue
+            m = row_re.search(u)
+            if not m:
+                continue
+            pct = m.group(1).replace(",", ".")
+            name_row = m.group(2).strip()
+            name_row = _fuzzy_match_name(name_row, load_rock_names())
+            quality = _clean_quality_token(m.group(3) or "")
+            # Prefer 3-4 digit quality from right-column OCR if available
+            if (len(quality) < 3 or not quality.isdigit()) and idx < len(quality_lines):
+                quality = quality_lines[idx]
+            if not quality:
+                # Try trailing digits from the segment itself
+                tail = _clean_quality_token(u)
+                if tail:
+                    quality = tail
+            try:
+                qv = int(quality) if quality else None
+                if qv is not None and (qv < 0 or qv > 1000):
+                    qv = None
+            except Exception:
+                qv = None
+            if qv is not None and len(str(qv)) < 3 and qv != 0:
+                qv = None
+            rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else ""})
+
+        if not rows and table_text:
+            for idx, l in enumerate(lines):
+                u = l.upper()
+                if "%" not in u:
+                    continue
+                m = row_re.search(u)
+                if not m:
+                    continue
+                pct = m.group(1).replace(",", ".")
+                name_row = _fuzzy_match_name(m.group(2).strip(), load_rock_names())
+                quality = (m.group(3) or "").strip()
+                if (len(quality) < 3 or not quality.isdigit()) and idx < len(quality_lines):
+                    quality = quality_lines[idx]
+                try:
+                    qv = int(quality) if quality else None
+                    if qv is not None and (qv < 0 or qv > 1000):
+                        qv = None
+                except Exception:
+                    qv = None
+                if qv is not None and len(str(qv)) < 3 and qv != 0:
+                    qv = None
+                rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else ""})
+
+        # Final fallback: parse rows from raw OCR text segments
+        if not rows:
+            raw_segments = (text or "").replace("\n", " ").split("|")
+            for idx, seg in enumerate(raw_segments):
+                u = seg.upper()
+                if "%" not in u:
+                    continue
+                m = row_re.search(u)
+                if not m:
+                    continue
+                pct = m.group(1).replace(",", ".")
+                name_row = _fuzzy_match_name(m.group(2).strip(), load_rock_names())
+                quality = (m.group(3) or "").strip()
+                if (len(quality) < 3 or not quality.isdigit()) and idx < len(quality_lines):
+                    quality = quality_lines[idx]
+                try:
+                    qv = int(quality) if quality else None
+                    if qv is not None and (qv < 0 or qv > 1000):
+                        qv = None
+                except Exception:
+                    qv = None
+                if qv is not None and len(str(qv)) < 3 and qv != 0:
+                    qv = None
+                rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else ""})
+
+        if not name and not rows and not any([mass, res, inst, comp]):
+            return None, text
+
+        name_list = load_rock_names()
+        raw_name = name or ""
+        name = _fuzzy_match_name(raw_name, name_list)
+        data = {
+            "name": name or "",
+            "raw_name": raw_name,
+            "mass": mass or "",
+            "res": res or "",
+            "inst": inst or "",
+            "comp": comp or "",
+            "rows": rows,
+            "raw_text": text,
+            "raw_stats": stats_text,
+            "raw_comp": comp_text,
+            "raw_table": table_text,
+            "raw_quality": quality_text,
+        }
+        return data, text
+    except Exception as e:
+        _ocr_log(f"[rock] exception parsing panel: {e}")
+        return None, ""
+
+def format_rock_details(data):
+    lines = []
+    if data.get("name"): lines.append(f"Name: {data['name']}")
+    if data.get("mass"): lines.append(f"Mass: {data['mass']}")
+    if data.get("res"): lines.append(f"Res: {data['res']}")
+    if data.get("inst"): lines.append(f"Inst: {data['inst']}")
+    if data.get("comp"): lines.append(f"Comp: {data['comp']}")
+    if data.get("rows"):
+        lines.append("Contents:")
+        for r in data["rows"]:
+            lines.append(f"  {r['pct']}%  {r['name']}  {r['quality']}")
+    return "\n".join(lines).strip()
+
+def load_rock_names(path=None):
+    try:
+        p = Path(path) if path else (_BASE_DIR / "rock_names.txt")
+        if not p.exists():
+            return []
+        lines = [l.strip() for l in p.read_text(encoding="utf-8", errors="ignore").splitlines()]
+        names = [l for l in lines if l and not l.startswith("#")]
+        return names
+    except Exception as e:
+        _ocr_log(f"[rock] error loading rock_names.txt: {e}")
+        return []
+
+def _fuzzy_match_name(raw_name, choices):
+    if not raw_name or not choices:
+        return raw_name
+    raw = raw_name.strip()
+    if raw in choices:
+        return raw
+    def _norm(s):
+        return re.sub(r"[^A-Za-z0-9]+", "", s).upper()
+    def _variants(s):
+        # Generate a few aggressive variants to handle OCR confusions
+        swaps = {
+            "0": "O", "1": "I", "2": "Z", "5": "S", "6": "G", "8": "B",
+            "W": "I", "M": "N", "RN": "M", "VV": "W",
+        }
+        base = _norm(s)
+        vars = {base}
+        for k, v in swaps.items():
+            vars.add(base.replace(k, v))
+        return vars
+    raw_vars = _variants(raw)
+    best = (0.0, raw)
+    for c in choices:
+        cn = _norm(c)
+        if not cn:
+            continue
+        for rv in raw_vars:
+            score = difflib.SequenceMatcher(None, rv, cn).ratio()
+            if score > best[0]:
+                best = (score, c)
+    return best[1] if best[0] >= 0.30 else raw
+
+def rock_boxes_for_shape(h, w):
+    # Rough zones based on layout of the rock panel
+    return {
+        "header": (int(0.02*w), int(0.02*h), int(0.96*w), int(0.10*h)),
+        "name":   (int(0.02*w), int(0.10*h), int(0.96*w), int(0.16*h)),
+        "stats":  (int(0.02*w), int(0.16*h), int(0.96*w), int(0.41*h)),
+        "comp":   (int(0.02*w), int(0.42*h), int(0.96*w), int(0.50*h)),
+        "table":  (int(0.02*w), int(0.54*h), int(0.96*w), int(0.96*h)),
+    }
 
 
 class UEXMarketError(Exception): pass
@@ -1238,7 +1751,6 @@ class Menu:
         self.calibration_hotkey_var = tk.StringVar(master=self.root, value=load_calibration_hotkey())
         self.hotkeys = GlobalHotkeyManager()
         self.support_popup_shown_this_session = False
-        self.support_state = increment_support_launch()
         self.root.title(f"{T('app_title')} {APP_VERSION_LABEL}")
         self.root.configure(bg=BG)
         self.root.resizable(False, False)
@@ -1263,7 +1775,7 @@ class Menu:
         self.mode_frame.pack(fill="x", padx=16, pady=(0,10))
         self.mode_vars = {}; self.mode_checkbuttons = {}
         selected_modes = load_selected_modes()
-        for key in ["asteroid","material","hand","salvage"]:
+        for key in ["asteroid","material","hand","salvage","rock"]:
             var = tk.BooleanVar(value=(key in selected_modes)); self.mode_vars[key] = var
             cb = tk.Checkbutton(self.mode_frame, text=mode_label(key), variable=var, bg=BG, fg=MODE_INFO[key]["color"], activebackground=BG, activeforeground=MODE_INFO[key]["color"], selectcolor=PANEL, font=f_alt(10), anchor="w")
             cb.pack(fill="x", padx=10, pady=2); self.mode_checkbuttons[key] = cb
@@ -1345,6 +1857,8 @@ class Menu:
         btn_frame = tk.Frame(self.root, bg=BG); btn_frame.pack(fill="x", padx=16, pady=6)
         self.btn_calibrate = tk.Button(btn_frame, text=T("calibrate_zone"), bg=PANEL, fg=ACCENT, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(11, "bold"), padx=12, pady=8, command=self.calibrate)
         self.btn_calibrate.pack(fill="x", pady=4)
+        self.btn_calibrate_rock = tk.Button(btn_frame, text=T("calibrate_rock"), bg=PANEL, fg=TEXT, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(10, "bold"), padx=12, pady=8, command=self.calibrate_rock)
+        self.btn_calibrate_rock.pack(fill="x", pady=4)
         self.btn_start = tk.Button(btn_frame, text=T("start_system"), bg=ACCENT, fg=BG, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(11, "bold"), padx=12, pady=10, command=self.start)
         self.btn_start.pack(fill="x", pady=4)
 
@@ -1372,7 +1886,7 @@ class Menu:
         self._register_menu_hotkey()
         self.root.protocol("WM_DELETE_WINDOW", self.close_menu)
         self._start_update_check()
-        self.root.after(700, self.maybe_show_support_popup)
+        # Support popup disabled
         self.root.mainloop()
 
     def close_menu(self):
@@ -1427,8 +1941,12 @@ class Menu:
         self.lbl_ocr_sensitivity.config(text=T("ocr_sensitivity")); self.btn_ocr_save.config(text=T("save")); self.lbl_ocr_status.config(text=ocr_sensitivity_label(self.ocr_sensitivity_var.get()))
         self.lbl_preview_mode.config(text=T("preview_mode")); self._refresh_preview_menu()
         self.chk_verify.config(text=T("verify_candidates"))
+        self.chk_rock_preview.config(text=T("rock_preview"))
+        self.chk_rock_boxes.config(text=T("rock_boxes"))
+        self.lbl_rock_ocr_mode.config(text=T("rock_ocr_mode")); self._refresh_rock_ocr_menu()
+        self.lbl_rock_preview_zoom.config(text=T("rock_preview_zoom"))
         self.lbl_calibration_hotkey.config(text=T("calibration_hotkey")); self.btn_hotkey_save.config(text=T("save"))
-        self.btn_calibrate.config(text=T("calibrate_zone")); self.btn_start.config(text=T("start_system")); self.btn_guide.config(text=T("guide")); self.btn_donate.config(text=T("donate"))
+        self.btn_calibrate.config(text=T("calibrate_zone")); self.btn_calibrate_rock.config(text=T("calibrate_rock")); self.btn_start.config(text=T("start_system")); self.btn_guide.config(text=T("guide")); self.btn_donate.config(text=T("donate"))
         status_text = T("csv_loaded") if self.mapping else T("csv_error"); status_fg = GREEN if self.mapping else RED
         self.status.config(text=status_text, fg=status_fg); self.lbl_hint.config(text=T("calibration_hint")); self.refresh_token_status()
 
@@ -1630,15 +2148,38 @@ class Menu:
             except Exception:
                 pass
 
+    def calibrate_rock(self):
+        self.root.withdraw()
+        try:
+            selector = RegionSelector(self.root)
+            if selector.result:
+                ROCK_CONFIG_FILE.write_text(json.dumps(selector.result, indent=2), encoding="utf-8")
+                self.status.config(text=T("csv_loaded") if self.mapping else T("csv_error"), fg=GREEN if self.mapping else RED)
+        except Exception as e:
+            messagebox.showerror(T("calibrate_rock"), str(e))
+        finally:
+            self.root.deiconify()
+            self.root.lift()
+            try:
+                self.root.attributes("-topmost", True)
+                self.root.focus_force()
+            except Exception:
+                pass
+
     def start(self):
         if not self.mapping: messagebox.showerror("Error", T("csv_error")); return
         if not CONFIG_FILE.exists(): messagebox.showwarning(T("calibrate_zone"), T("calibration_hint")); return
         modes = self.get_selected_modes(); save_selected_modes(modes)
+        if "rock" in modes and not ROCK_CONFIG_FILE.exists():
+            messagebox.showwarning(T("calibrate_rock"), T("rock_missing_calibration")); return
         region = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         self.hotkeys.stop()
         self.root.destroy()
         try:
-            App(region, self.mapping, modes)
+            rock_region = None
+            if ROCK_CONFIG_FILE.exists():
+                rock_region = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+            App(region, self.mapping, modes, rock_region)
         except Exception as e:
             _ocr_log(f"[overlay] failed to start: {e}")
             messagebox.showerror("Overlay error", str(e))
@@ -1820,6 +2361,44 @@ class App:
             try: self.verify_label.config(text="")
             except Exception: pass
 
+    def _toggle_rock_preview_enabled(self):
+        self.rock_preview_enabled = bool(self.rock_preview_var.get())
+        save_rock_preview_enabled(self.rock_preview_enabled)
+        if not self.rock_preview_enabled:
+            try:
+                self.rock_preview_label.config(image="", text="")
+                self._rock_preview_photo = None
+            except Exception:
+                pass
+
+    def _toggle_rock_boxes_enabled(self):
+        self.rock_boxes_enabled = bool(self.rock_boxes_var.get())
+        save_rock_boxes_enabled(self.rock_boxes_enabled)
+
+    def _rock_ocr_label(self, mode):
+        if mode == "bright": return T("rock_ocr_bright")
+        if mode == "adaptive": return T("rock_ocr_adaptive")
+        if mode == "color": return T("rock_ocr_color")
+        return T("rock_ocr_gray")
+
+    def _refresh_rock_ocr_menu(self):
+        menu = self.rock_ocr_menu["menu"]
+        menu.delete(0, "end")
+        for mode in ROCK_OCR_MODES:
+            menu.add_command(label=self._rock_ocr_label(mode), command=lambda m=mode: self.rock_ocr_mode_var.set(m))
+
+    def _set_rock_ocr_mode(self, mode):
+        self.rock_ocr_mode = mode if mode in ROCK_OCR_MODES else "gray"
+        save_rock_ocr_mode(self.rock_ocr_mode)
+
+    def _set_rock_preview_zoom(self, value):
+        try:
+            v = float(value)
+        except Exception:
+            v = 1.0
+        self.rock_preview_zoom = max(1.0, min(10.0, v))
+        save_rock_preview_zoom(self.rock_preview_zoom)
+
     def _get_preview_image(self, img):
         if self.preview_mode == "processed":
             proc = preprocess_bright(img)
@@ -1841,7 +2420,91 @@ class App:
         except Exception as e:
             _ocr_log(f"[preview] {e}")
 
-    def __init__(self, region, mapping, active_modes):
+    def _set_rock_text(self, text):
+        try:
+            self.rock_label.config(text=text)
+        except Exception:
+            pass
+
+    def _render_rock_preview(self, img):
+        try:
+            if not self.rock_preview_enabled:
+                return
+            h, w = img.shape[:2]
+            # Ensure preview area matches captured size (1:1)
+            try:
+                cur_h = int(self.rock_preview_frame.winfo_height())
+            except Exception:
+                cur_h = 0
+            target_h = int(h * self.rock_preview_zoom)
+            if target_h < 20: target_h = h
+            if cur_h != target_h:
+                self.rock_preview_frame.config(height=target_h)
+            display_img = img
+            if self.rock_ocr_mode != "gray":
+                display_img = _rock_preprocess_preview(img, self.rock_ocr_mode)
+                if len(display_img.shape) == 2:
+                    display_img = cv2.cvtColor(display_img, cv2.COLOR_GRAY2BGR)
+            if self.rock_boxes_enabled:
+                colors = {
+                    "header": (255, 0, 0),
+                    "name": (0, 255, 0),
+                    "stats": (0, 128, 255),
+                    "comp": (255, 0, 255),
+                    "table": (0, 255, 255),
+                }
+                for key, (x1, y1, x2, y2) in rock_boxes_for_shape(h, w).items():
+                    color = colors.get(key, (0, 255, 255))
+                    cv2.rectangle(display_img, (x1, y1), (x2, y2), color, 1)
+            # Render at preview zoom
+            if self.rock_preview_zoom != 1.0:
+                display_img = cv2.resize(display_img, (max(1, int(w * self.rock_preview_zoom)), max(1, int(h * self.rock_preview_zoom))), interpolation=cv2.INTER_NEAREST)
+            ok, buf = cv2.imencode(".png", display_img)
+            if not ok:
+                return
+            data = base64.b64encode(buf).decode("ascii")
+            photo = tk.PhotoImage(data=data, format="PNG")
+            self._rock_preview_photo = photo
+            self.rock_preview_label.config(image=photo)
+        except Exception as e:
+            _ocr_log(f"[rock_preview] {e}")
+
+    def _maybe_update_rock(self, data):
+        if not data:
+            if not self.rock_data:
+                self._ui_call(lambda: _safe_widget_call(self.rock_label, lambda: self._set_rock_text(T("rock_scanning"))))
+            return
+        text = format_rock_details(data)
+        raw_name = data.get("raw_name", "").strip()
+        matched_name = data.get("name", "").strip()
+        if self.verify_enabled:
+            extra = f"Name OCR: {raw_name or '—'}  |  Matched: {matched_name or '—'}"
+            text = f"{extra}\n{text}" if text else extra
+            raw_text = (data.get("raw_text") or "").strip()
+            if raw_text:
+                _ocr_log(f"[rock_raw] {raw_text.replace(chr(10),' | ')}")
+            raw_stats = (data.get("raw_stats") or "").strip()
+            if raw_stats:
+                _ocr_log(f"[rock_raw_stats] {raw_stats.replace(chr(10),' | ')}")
+            raw_comp = (data.get("raw_comp") or "").strip()
+            if raw_comp:
+                _ocr_log(f"[rock_raw_comp] {raw_comp.replace(chr(10),' | ')}")
+            raw_table = (data.get("raw_table") or "").strip()
+            if raw_table:
+                _ocr_log(f"[rock_raw_table] {raw_table.replace(chr(10),' | ')}")
+            raw_quality = (data.get("raw_quality") or "").strip()
+            _ocr_log(f"[rock_raw_quality] {raw_quality.replace(chr(10),' | ')}" if raw_quality else "[rock_raw_quality] —")
+            parsed = f"Name={matched_name or '—'} Mass={data.get('mass','') or '—'} Res={data.get('res','') or '—'} Inst={data.get('inst','') or '—'} Comp={data.get('comp','') or '—'} Rows={len(data.get('rows',[]))}"
+            _ocr_log(f"[rock_parsed] {parsed}")
+        now = time.time()
+        if self.rock_data is None or text != self.rock_data:
+            if self.rock_data is None or (now - self.rock_last_update) >= self.history_duration:
+                self.rock_data = text
+                self.rock_last_update = now
+                self._ui_call(lambda t=text: _safe_widget_call(self.rock_label, lambda: self._set_rock_text(t)))
+                _ocr_log(f"[rock] {text.replace(chr(10),' | ')}")
+
+    def __init__(self, region, mapping, active_modes, rock_region=None):
         global LANG
         LANG = load_lang()
         self.region = region; self.mapping = mapping; self.lookup = build_lookup(mapping); self.active_modes = set(active_modes)
@@ -1852,6 +2515,15 @@ class App:
         self._preview_last_ts = 0.0
         self._preview_photo = None
         self.verify_enabled = load_verify_enabled()
+        self.rock_region = rock_region
+        self.rock_data = None
+        self.rock_last_update = 0
+        self._rock_last_ts = 0.0
+        self.rock_preview_enabled = load_rock_preview_enabled()
+        self.rock_boxes_enabled = load_rock_boxes_enabled()
+        self.rock_ocr_mode = load_rock_ocr_mode()
+        self.rock_preview_zoom = load_rock_preview_zoom()
+        self._rock_preview_photo = None
         self.market_enabled = load_market_enabled(); self.market_client = UEXMarketClient(token=load_uex_token()); self.market_request_id = 0; self.current_market_material = None; self.current_market_kind = None
         self.hotkeys = GlobalHotkeyManager()
 
@@ -1870,7 +2542,7 @@ class App:
 
         mode_frame = tk.Frame(self.root, bg=BG); mode_frame.pack(fill="x", padx=8, pady=(6,3))
         self.mode_vars = {}; self.mode_checkbuttons = {}
-        for key in ["asteroid","material","hand","salvage"]:
+        for key in ["asteroid","material","hand","salvage","rock"]:
             var = tk.BooleanVar(value=(key in self.active_modes)); self.mode_vars[key] = var
             cb = tk.Checkbutton(mode_frame, text=mode_label(key), variable=var, command=self.apply_mode_selection, bg=BG, fg=MODE_INFO[key]["color"], activebackground=BG, activeforeground=MODE_INFO[key]["color"], selectcolor=PANEL, font=f_alt(9))
             cb.pack(side="left", padx=3); self.mode_checkbuttons[key] = cb
@@ -1890,6 +2562,28 @@ class App:
         self.verify_var = tk.BooleanVar(value=self.verify_enabled)
         self.chk_verify = tk.Checkbutton(verify_row, text=T("verify_candidates"), variable=self.verify_var, command=self._toggle_verify_enabled, bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT, selectcolor=PANEL, font=f_alt(9))
         self.chk_verify.pack(side="left")
+        self.rock_preview_var = tk.BooleanVar(value=self.rock_preview_enabled)
+        self.chk_rock_preview = tk.Checkbutton(verify_row, text=T("rock_preview"), variable=self.rock_preview_var, command=self._toggle_rock_preview_enabled, bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT, selectcolor=PANEL, font=f_alt(9))
+        self.chk_rock_preview.pack(side="left", padx=(10,0))
+        self.rock_boxes_var = tk.BooleanVar(value=self.rock_boxes_enabled)
+        self.chk_rock_boxes = tk.Checkbutton(verify_row, text=T("rock_boxes"), variable=self.rock_boxes_var, command=self._toggle_rock_boxes_enabled, bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT, selectcolor=PANEL, font=f_alt(9))
+        self.chk_rock_boxes.pack(side="left", padx=(10,0))
+        self.lbl_rock_ocr_mode = tk.Label(verify_row, text=T("rock_ocr_mode"), bg=BG, fg=TEXT, font=f_alt(9, "bold"))
+        self.lbl_rock_ocr_mode.pack(side="left", padx=(12,4))
+        self.rock_ocr_mode_var = tk.StringVar(value=self.rock_ocr_mode)
+        self.rock_ocr_menu = tk.OptionMenu(verify_row, self.rock_ocr_mode_var, *ROCK_OCR_MODES)
+        self.rock_ocr_menu.config(bg=PANEL, fg=TEXT, activebackground=PANEL_2, activeforeground=TEXT, relief="flat", highlightthickness=0)
+        self.rock_ocr_menu["menu"].config(bg=PANEL, fg=TEXT)
+        self.rock_ocr_menu.pack(side="left")
+        self._refresh_rock_ocr_menu()
+        self.rock_ocr_mode_var.trace_add("write", lambda *args: self._set_rock_ocr_mode(self.rock_ocr_mode_var.get()))
+        self.lbl_rock_preview_zoom = tk.Label(verify_row, text=T("rock_preview_zoom"), bg=BG, fg=TEXT, font=f_alt(9, "bold"))
+        self.lbl_rock_preview_zoom.pack(side="left", padx=(12,4))
+        self.rock_preview_zoom_var = tk.DoubleVar(value=self.rock_preview_zoom)
+        self.rock_preview_zoom_scale = tk.Scale(verify_row, from_=1, to=10, resolution=0.5, orient="horizontal", length=140,
+                                                showvalue=True, variable=self.rock_preview_zoom_var, command=self._set_rock_preview_zoom,
+                                                bg=BG, fg=TEXT, troughcolor=PANEL, highlightthickness=0)
+        self.rock_preview_zoom_scale.pack(side="left")
 
         self.preview_frame = tk.Frame(self.root, bg=BG, height=140)
         self.preview_frame.pack(fill="x", padx=8, pady=(0,4))
@@ -1923,6 +2617,21 @@ class App:
         self.info_label = tk.Label(self.root, text=T("scanning"), bg=BG, fg=MUTED, font=f_alt(9), anchor="w", justify="left"); self.info_label.pack(fill="x", padx=8, pady=(0,2))
         self.verify_label = tk.Label(self.root, text="", bg=BG, fg=MUTED, font=f_mono(8), anchor="w", justify="left", wraplength=680)
         self.verify_label.pack(fill="x", padx=8, pady=(0,2))
+
+        self.rock_frame = tk.Frame(self.root, bg=BG)
+        self.rock_frame.pack(fill="x", padx=8, pady=(0,4))
+        self.rock_title = tk.Label(self.rock_frame, text=T("rock_panel"), bg=BG, fg=ACCENT, font=f_ui(9, "bold"), anchor="w")
+        self.rock_title.pack(fill="x")
+        self.rock_label = tk.Label(self.rock_frame, text=T("rock_scanning") if "rock" in self.active_modes else "", bg=BG, fg=TEXT, font=f_mono(9), anchor="w", justify="left", wraplength=680)
+        self.rock_label.pack(fill="x")
+
+        self.rock_preview_frame = tk.Frame(self.root, bg=BG, height=120)
+        self.rock_preview_frame.pack(fill="x", padx=8, pady=(0,4))
+        self.rock_preview_frame.pack_propagate(False)
+        self.rock_preview_label = tk.Label(self.rock_preview_frame, text="", bg=PANEL, fg=MUTED, font=f_mono(8), anchor="center")
+        self.rock_preview_label.pack(fill="both", expand=True)
+        if not self.rock_preview_enabled:
+            self.rock_preview_label.config(text="")
         self.history_hint_label = tk.Label(self.root, text=T("click_history_hint"), bg=BG, fg=MUTED, font=f_alt(8), anchor="w", justify="left")
         self.history_hint_label.pack(fill="x", padx=8, pady=(0,4))
         self.result_frame = tk.Frame(self.root, bg=BG); self.result_frame.pack(fill="x", padx=8, pady=(0,8))
@@ -2428,6 +3137,16 @@ class App:
             try:
                 img = capture_region(self.region)
                 self._show_preview(img)
+
+                if "rock" in self.active_modes and self.rock_region:
+                    now = time.time()
+                    if now - self._rock_last_ts >= 0.6:
+                        self._rock_last_ts = now
+                        rock_img = capture_region(self.rock_region)
+                        if self.rock_preview_enabled:
+                            self._ui_call(lambda im=rock_img.copy(): _safe_widget_call(self.rock_preview_label, lambda: self._render_rock_preview(im)))
+                        rock_data, _ = parse_rock_details(rock_img, self.rock_ocr_mode)
+                        self._maybe_update_rock(rock_data)
                 raw, raw_candidates, validated = _read_number_internal(img, self.lookup, self.active_modes)
                 if self.verify_enabled:
                     raw_set = ", ".join(sorted(set(raw_candidates))) if raw_candidates else "—"

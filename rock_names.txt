@@ -1,0 +1,4 @@
+Gold (Ore)
+Iron (Ore)
+Heph (Raw)
+Inert Materials
