@@ -2,3 +2,8 @@ build/
 output/
 *.exe
 __pycache__/
+tesseract/
+config.json
+preferences.json
+*.log
+*.sqlite3

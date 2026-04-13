@@ -13,6 +13,7 @@ Pitipen Mining System
 
 import csv
 import json
+import base64
 import os
 import re
 import sqlite3
@@ -46,8 +47,8 @@ UEX_CACHE_TTL = 12 * 60 * 60
 UEX_HTTP_TIMEOUT = 15
 SUPPORT_PROMPT_INTERVAL = 5
 
-PAYPAL_URL = "https://paypal.me/Danielpolopradanos"
-DISCORD_URL = "https://discord.com/users/danypolo"
+PAYPAL_URL = ""
+DISCORD_URL = ""
 
 BG = "#0b0f14"
 PANEL = "#121820"
@@ -72,7 +73,7 @@ DEFAULT_MODES = {"asteroid"}
 ROOT_NAME = "Pitipen Mining System"
 APP_VERSION = "1.4.5"
 APP_VERSION_LABEL = f"V {APP_VERSION}"
-VERSION_JSON_URL = "https://raw.githubusercontent.com/danypolo/pitipen-mining-system/main/version.json"
+VERSION_JSON_URL = "https://raw.githubusercontent.com/bradsour/pitipen-mining-system/main/version.json"
 
 import sys as _sys, os as _os
 if getattr(_sys, "_MEIPASS", None):
@@ -89,7 +90,7 @@ UEX_DB_FILE = _BASE_DIR / "uex_cache.sqlite3"
 OCR_LOG_FILE = _BASE_DIR / "ocr_debug.log"
 
 SUPPORTED_LANGS = ["es", "en", "fr", "de", "ru"]
-LANG = "es"
+LANG = "en"
 
 OCR_SENSITIVITY_PROFILES = {
     "low": {
@@ -121,6 +122,7 @@ DEFAULT_OCR_SENSITIVITY = "normal"
 DEFAULT_CALIBRATION_HOTKEY = "F8"
 DEFAULT_SHOW_OVERLAY_HOTKEY = "F7"
 HOTKEY_OPTIONS = ["F6", "F7", "F8", "F9", "F10"]
+PREVIEW_MODES = ["none", "raw", "processed"]
 
 
 TEXTS = {
@@ -223,6 +225,11 @@ TEXTS = {
     "contains":{"es":"Contiene:","en":"Contains:","fr":"Contient :","de":"Enthält:","ru":"Содержит:"},
     "history_duration":{"es":"Duración mensajes (s)","en":"Message duration (s)","fr":"Durée des messages (s)","de":"Nachrichtendauer (s)","ru":"Длительность сообщений (с)"},
     "ocr_sensitivity":{"es":"Sensibilidad OCR","en":"OCR sensitivity","fr":"Sensibilité OCR","de":"OCR-Empfindlichkeit","ru":"Чувствительность OCR"},
+    "preview_mode":{"es":"Vista previa","en":"Preview","fr":"Aper?u","de":"Vorschau","ru":"Preview"},
+    "preview_none":{"es":"Ninguna","en":"None","fr":"Aucun","de":"Keine","ru":"None"},
+    "preview_raw":{"es":"OCR Preview","en":"OCR Preview","fr":"OCR Preview","de":"OCR Preview","ru":"OCR Preview"},
+    "preview_processed":{"es":"Imagen procesada","en":"Processed Image","fr":"Image trait?e","de":"Verarbeitetes Bild","ru":"Processed Image"},
+    "verify_candidates": {"es":"Verificar candidatos","en":"Verify candidates","fr":"V?rifier candidats","de":"Kandidaten pr?fen","ru":"Verify candidates"},
     "calibration_hotkey":{"es":"Atajo calibración","en":"Calibration hotkey","fr":"Raccourci calibration","de":"Kalibrierungs-Hotkey","ru":"Горячая клавиша калибровки"},
     "hotkey_saved":{"es":"Atajo guardado","en":"Hotkey saved","fr":"Raccourci enregistré","de":"Hotkey gespeichert","ru":"Горячая клавиша сохранена"},
     "hotkeys_unavailable":{"es":"Hotkeys no disponibles","en":"Hotkeys unavailable","fr":"Raccourcis indisponibles","de":"Hotkeys nicht verfügbar","ru":"Горячие клавиши недоступны"},
@@ -383,13 +390,13 @@ def _find_tesseract():
         traineddata = os.path.join(tessdata_dir, "eng.traineddata")
 
         if not os.path.exists(exe_path):
-            _ocr_log(f"[tesseract] tesseract.exe no encontrado en: {tess_dir}")
+            _ocr_log(f"[tesseract] tesseract.exe not found at: {tess_dir}")
             return None, None
         if not os.path.isdir(tessdata_dir):
-            _ocr_log(f"[tesseract] carpeta tessdata/ no encontrada en: {tess_dir}")
+            _ocr_log(f"[tesseract] tessdata/ folder not found at: {tess_dir}")
             return None, None
         if not os.path.exists(traineddata):
-            _ocr_log(f"[tesseract] eng.traineddata no encontrado en: {tessdata_dir}")
+            _ocr_log(f"[tesseract] eng.traineddata not found at: {tessdata_dir}")
 
         # Forzamos la carpeta tessdata real y además la pasaremos por config.
         os.environ["TESSDATA_PREFIX"] = tessdata_dir
@@ -483,8 +490,8 @@ TESS_CONFIG_FALL = TESS_CONFIG
 try:
     v = pytesseract.get_tesseract_version()
     _ocr_log(f"[tesseract] versión detectada: {v}")
-    _ocr_log(f"[tesseract] comando usado: {TESSERACT_CMD}")
-    _ocr_log(f"[tesseract] tessdata usada: {TESSDATA_DIR}")
+    _ocr_log(f"[tesseract] command used: {TESSERACT_CMD}")
+    _ocr_log(f"[tesseract] tessdata used: {TESSDATA_DIR}")
 except Exception as e:
     _ocr_log(f"[tesseract] ERROR REAL al validar instalación: {e}")
 
@@ -524,8 +531,8 @@ def save_overlay_geometry(geometry):
     prefs = load_prefs(); prefs["__overlay_geometry__"] = geometry; save_prefs(prefs)
 
 def load_lang():
-    prefs = load_prefs(); lang = prefs.get("__lang__", "es")
-    return lang if lang in SUPPORTED_LANGS else "es"
+    prefs = load_prefs(); lang = prefs.get("__lang__", "en")
+    return lang if lang in SUPPORTED_LANGS else "en"
 
 def save_lang(lang):
     prefs = load_prefs(); prefs["__lang__"] = lang; save_prefs(prefs)
@@ -537,6 +544,17 @@ def save_uex_token(token):
 def load_market_enabled(): return bool(load_prefs().get("__market_enabled__", False))
 def save_market_enabled(enabled):
     prefs = load_prefs(); prefs["__market_enabled__"] = bool(enabled); save_prefs(prefs)
+
+def load_preview_mode():
+    val = str(load_prefs().get("__preview_mode__", "none")).lower()
+    return val if val in PREVIEW_MODES else "none"
+def save_preview_mode(mode):
+    mode = str(mode).lower()
+    prefs = load_prefs(); prefs["__preview_mode__"] = mode if mode in PREVIEW_MODES else "none"; save_prefs(prefs)
+
+def load_verify_enabled(): return bool(load_prefs().get("__verify_enabled__", False))
+def save_verify_enabled(enabled):
+    prefs = load_prefs(); prefs["__verify_enabled__"] = bool(enabled); save_prefs(prefs)
 
 def load_history_duration():
     try:
@@ -657,7 +675,7 @@ class GlobalHotkeyManager:
             self._handles.append(handle)
             return True
         except Exception as e:
-            _ocr_log(f"[hotkey] error registrando {hotkey}: {e}")
+            _ocr_log(f"[hotkey] error registering {hotkey}: {e}")
             return False
 
     def stop(self):
@@ -828,12 +846,18 @@ def candidate_corrections(val):
 def _run_tesseract(proc, config):
     """
     Ejecuta pytesseract con el config dado.
-    Devuelve lista de candidatos numéricos (3-6 dígitos).
+    Devuelve lista de candidatos num?ricos (3-6 d?gitos), aceptando comas.
     Registra cualquier error en el log.
     """
     try:
         text = pytesseract.image_to_string(proc, config=config).strip()
-        return re.findall(r"\d{3,6}", text)
+        raw = re.findall(r"\d[\d,]{2,8}", text)
+        cleaned = []
+        for val in raw:
+            norm = val.replace(",", "")
+            if norm.isdigit() and 3 <= len(norm) <= 6:
+                cleaned.append(norm)
+        return cleaned
     except Exception as e:
         _ocr_log(f"[tesseract] error con config '{config}': {e}")
         return []
@@ -851,7 +875,7 @@ def _run_tesseract(proc, config):
 #  - Los errores de Tesseract se registran en ocr_debug.log en lugar de
 #    silenciarse con "except: pass".
 # ---------------------------------------------------------------------------
-def read_number(img, lookup, active_modes):
+def _read_number_internal(img, lookup, active_modes):
     img = crop_to_number(img)
     processed_versions = [
         preprocess_bright(img),
@@ -870,8 +894,8 @@ def read_number(img, lookup, active_modes):
             raw_candidates.extend(_run_tesseract(inv, TESS_CONFIG))
 
     if not raw_candidates:
-        _ocr_log("[read_number] sin candidatos tras todos los intentos")
-        return None
+        _ocr_log("[read_number] no candidates after all attempts")
+        return None, raw_candidates, []
 
     validated = []
     numeric_fallback = []
@@ -886,10 +910,15 @@ def read_number(img, lookup, active_modes):
         counts = {}
         for cand in validated:
             counts[cand] = counts.get(cand, 0) + 1
-        return max(counts, key=counts.get)
+        return max(counts, key=counts.get), raw_candidates, validated
 
-    _ocr_log(f"[read_number] candidatos no validados descartados: {raw_candidates}")
-    return None
+    _ocr_log(f"[read_number] discarded unvalidated candidates: {raw_candidates}")
+    return None, raw_candidates, validated
+
+
+def read_number(img, lookup, active_modes):
+    value, _, _ = _read_number_internal(img, lookup, active_modes)
+    return value
 
 
 class UEXMarketError(Exception): pass
@@ -1287,6 +1316,18 @@ class Menu:
         self.lbl_ocr_status = tk.Label(ocr_row, text=ocr_sensitivity_label(self.ocr_sensitivity_var.get()), bg=BG, fg=MUTED, font=f_alt(9))
         self.lbl_ocr_status.pack(side="left", padx=(12, 0))
 
+        preview_row = tk.Frame(self.root, bg=BG)
+        preview_row.pack(fill="x", padx=16, pady=(0, 8))
+        self.lbl_preview_mode = tk.Label(preview_row, text=T("preview_mode"), bg=BG, fg=TEXT, font=f_alt(10, "bold"))
+        self.lbl_preview_mode.pack(side="left")
+        self.preview_mode_var = tk.StringVar(master=self.root, value=load_preview_mode())
+        self.preview_menu = tk.OptionMenu(preview_row, self.preview_mode_var, *PREVIEW_MODES)
+        self.preview_menu.config(bg=PANEL, fg=TEXT, activebackground=PANEL_2, activeforeground=TEXT, relief="flat", highlightthickness=0)
+        self.preview_menu["menu"].config(bg=PANEL, fg=TEXT)
+        self.preview_menu.pack(side="left", padx=8)
+        self._refresh_preview_menu()
+        self.preview_mode_var.trace_add("write", lambda *args: self._set_preview_mode(self.preview_mode_var.get()))
+
         hotkey_row = tk.Frame(self.root, bg=BG)
         hotkey_row.pack(fill="x", padx=16, pady=(0, 8))
         self.lbl_calibration_hotkey = tk.Label(hotkey_row, text=T("calibration_hotkey"), bg=BG, fg=TEXT, font=f_alt(10, "bold"))
@@ -1384,6 +1425,8 @@ class Menu:
         self.btn_show.config(text=T("hide") if not self.token_hidden else T("show")); self.btn_save.config(text=T("save")); self.btn_test.config(text=T("test"))
         self.lbl_history_duration.config(text=T("history_duration")); self.btn_history_save.config(text=T("save"))
         self.lbl_ocr_sensitivity.config(text=T("ocr_sensitivity")); self.btn_ocr_save.config(text=T("save")); self.lbl_ocr_status.config(text=ocr_sensitivity_label(self.ocr_sensitivity_var.get()))
+        self.lbl_preview_mode.config(text=T("preview_mode")); self._refresh_preview_menu()
+        self.chk_verify.config(text=T("verify_candidates"))
         self.lbl_calibration_hotkey.config(text=T("calibration_hotkey")); self.btn_hotkey_save.config(text=T("save"))
         self.btn_calibrate.config(text=T("calibrate_zone")); self.btn_start.config(text=T("start_system")); self.btn_guide.config(text=T("guide")); self.btn_donate.config(text=T("donate"))
         status_text = T("csv_loaded") if self.mapping else T("csv_error"); status_fg = GREEN if self.mapping else RED
@@ -1394,6 +1437,20 @@ class Menu:
         state = "normal" if enabled else "disabled"
         self.entry_token.config(state=state); self.btn_show.config(state=state); self.btn_save.config(state=state); self.btn_test.config(state=state); self.btn_help.config(state=state)
         self.refresh_token_status()
+
+    def _preview_label(self, mode):
+        if mode == "raw": return T("preview_raw")
+        if mode == "processed": return T("preview_processed")
+        return T("preview_none")
+
+    def _refresh_preview_menu(self):
+        menu = self.preview_menu["menu"]
+        menu.delete(0, "end")
+        for mode in PREVIEW_MODES:
+            menu.add_command(label=self._preview_label(mode), command=lambda m=mode: self.preview_mode_var.set(m))
+
+    def _set_preview_mode(self, mode):
+        save_preview_mode(mode)
 
     def refresh_token_status(self):
         if not self.market_enabled_var.get(): self.lbl_token_status.config(text=T("market_disabled"), fg=MUTED); return
@@ -1579,7 +1636,12 @@ class Menu:
         modes = self.get_selected_modes(); save_selected_modes(modes)
         region = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         self.hotkeys.stop()
-        self.root.destroy(); App(region, self.mapping, modes)
+        self.root.destroy()
+        try:
+            App(region, self.mapping, modes)
+        except Exception as e:
+            _ocr_log(f"[overlay] failed to start: {e}")
+            messagebox.showerror("Overlay error", str(e))
 
 
 class App:
@@ -1614,6 +1676,7 @@ class App:
 
     def _show_overlay(self):
         try:
+            self._ensure_overlay_visible()
             self.root.deiconify()
             self.root.lift()
             self.root.attributes("-topmost", True)
@@ -1631,6 +1694,52 @@ class App:
         except Exception:
             pass
         self._ui_after(1200, self._keep_window_alive)
+
+    def _ensure_overlay_visible(self):
+        try:
+            if not self.running or self.root is None or int(self.root.winfo_exists()) != 1:
+                return
+            self.root.update_idletasks()
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            geom = self.root.geometry()
+            m = re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", geom)
+            if not m:
+                self.root.geometry("720x900+30+30")
+                return
+            cur_w = int(m.group(1)); cur_h = int(m.group(2)); pos_x = int(m.group(3)); pos_y = int(m.group(4))
+            if cur_w < 200 or cur_h < 200:
+                cur_w, cur_h = 720, 900
+            max_x = max(0, sw - 60)
+            max_y = max(0, sh - 60)
+            new_x = min(max(0, pos_x), max_x)
+            new_y = min(max(0, pos_y), max_y)
+            if new_x != pos_x or new_y != pos_y:
+                self.root.geometry(f"{cur_w}x{cur_h}+{new_x}+{new_y}")
+        except Exception:
+            pass
+
+    def _force_debug_overlay(self):
+        try:
+            if not self.running or self.root is None or int(self.root.winfo_exists()) != 1:
+                return
+            self.root.update_idletasks()
+            if int(self.root.winfo_viewable()) == 1:
+                return
+            # Fallback: disable overrideredirect and force a visible window
+            try: self.root.overrideredirect(False)
+            except Exception: pass
+            try: self.root.attributes("-alpha", 1.0)
+            except Exception: pass
+            self.root.geometry("720x900+50+50")
+            self.root.deiconify()
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            if not getattr(self, "_debug_overlay_label", None):
+                self._debug_overlay_label = tk.Label(self.root, text="DEBUG OVERLAY MODE", bg=RED, fg=BG, font=f_ui(12, "bold"))
+                self._debug_overlay_label.pack(fill="x", padx=6, pady=6)
+        except Exception as e:
+            _ocr_log(f"[overlay] debug fallback failed: {e}")
 
     def _calibrate_from_overlay(self):
         try:
@@ -1651,6 +1760,87 @@ class App:
         self.hotkeys.add(DEFAULT_SHOW_OVERLAY_HOTKEY, lambda: self.root.after(0, self._show_overlay))
         self.hotkeys.add(load_calibration_hotkey(), lambda: self.root.after(0, self._calibrate_from_overlay))
 
+    def _preview_label(self, mode):
+        if mode == "raw": return T("preview_raw")
+        if mode == "processed": return T("preview_processed")
+        return T("preview_none")
+
+    def _clear_preview_widget(self):
+        try:
+            self.preview_label.config(image="", text="")
+            self._preview_photo = None
+        except Exception:
+            pass
+
+    def _render_preview(self, img):
+        try:
+            if self.preview_mode == "none":
+                self._clear_preview_widget()
+                return
+            h, w = img.shape[:2]
+            max_w = self.preview_label.winfo_width()
+            max_h = self.preview_label.winfo_height()
+            if max_w <= 1: max_w = 320
+            if max_h <= 1: max_h = 120
+            scale = min(max_w / float(w), max_h / float(h), 1.0)
+            if scale < 1.0:
+                img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+            # Encode as PNG for Tk (more reliable than raw PPM)
+            ok, buf = cv2.imencode(".png", img)
+            if not ok:
+                raise RuntimeError("png_encode_failed")
+            data = base64.b64encode(buf).decode("ascii")
+            photo = tk.PhotoImage(data=data, format="PNG")
+            self._preview_photo = photo
+            self.preview_label.config(image=photo)
+        except Exception as e:
+            _ocr_log(f"[preview_render] {e}")
+            try:
+                h, w = img.shape[:2]
+                self.preview_label.config(image="", text=f"Preview error ({w}x{h})")
+            except Exception:
+                pass
+
+    def _refresh_preview_menu(self):
+        menu = self.preview_menu["menu"]
+        menu.delete(0, "end")
+        for mode in PREVIEW_MODES:
+            menu.add_command(label=self._preview_label(mode), command=lambda m=mode: self.preview_mode_var.set(m))
+
+    def _set_preview_mode(self, mode):
+        self.preview_mode = mode if mode in PREVIEW_MODES else "none"
+        save_preview_mode(self.preview_mode)
+        if self.preview_mode == "none":
+            self._clear_preview_widget()
+
+    def _toggle_verify_enabled(self):
+        self.verify_enabled = bool(self.verify_var.get())
+        save_verify_enabled(self.verify_enabled)
+        if not self.verify_enabled:
+            try: self.verify_label.config(text="")
+            except Exception: pass
+
+    def _get_preview_image(self, img):
+        if self.preview_mode == "processed":
+            proc = preprocess_bright(img)
+            if len(proc.shape) == 2:
+                proc = cv2.cvtColor(proc, cv2.COLOR_GRAY2BGR)
+            return proc
+        return img
+
+    def _show_preview(self, img):
+        if self.preview_mode == "none":
+            return
+        try:
+            now = time.time()
+            if now - self._preview_last_ts < 0.12:
+                return
+            self._preview_last_ts = now
+            preview_img = self._get_preview_image(img)
+            self._ui_call(lambda im=preview_img.copy(): self._render_preview(im))
+        except Exception as e:
+            _ocr_log(f"[preview] {e}")
+
     def __init__(self, region, mapping, active_modes):
         global LANG
         LANG = load_lang()
@@ -1658,6 +1848,10 @@ class App:
         self.running = True; self.confirmed_value = None; self.history = []; self.last_seen_time = 0; self.recent_detections = []
         self.history_duration = load_history_duration()
         self.ocr_profile = get_ocr_profile()
+        self.preview_mode = load_preview_mode()
+        self._preview_last_ts = 0.0
+        self._preview_photo = None
+        self.verify_enabled = load_verify_enabled()
         self.market_enabled = load_market_enabled(); self.market_client = UEXMarketClient(token=load_uex_token()); self.market_request_id = 0; self.current_market_material = None; self.current_market_kind = None
         self.hotkeys = GlobalHotkeyManager()
 
@@ -1681,6 +1875,30 @@ class App:
             cb = tk.Checkbutton(mode_frame, text=mode_label(key), variable=var, command=self.apply_mode_selection, bg=BG, fg=MODE_INFO[key]["color"], activebackground=BG, activeforeground=MODE_INFO[key]["color"], selectcolor=PANEL, font=f_alt(9))
             cb.pack(side="left", padx=3); self.mode_checkbuttons[key] = cb
 
+        preview_row = tk.Frame(self.root, bg=BG); preview_row.pack(fill="x", padx=8, pady=(0,2))
+        self.lbl_preview_mode = tk.Label(preview_row, text=T("preview_mode"), bg=BG, fg=TEXT, font=f_alt(9, "bold"))
+        self.lbl_preview_mode.pack(side="left")
+        self.preview_mode_var = tk.StringVar(value=self.preview_mode)
+        self.preview_menu = tk.OptionMenu(preview_row, self.preview_mode_var, *PREVIEW_MODES)
+        self.preview_menu.config(bg=PANEL, fg=TEXT, activebackground=PANEL_2, activeforeground=TEXT, relief="flat", highlightthickness=0)
+        self.preview_menu["menu"].config(bg=PANEL, fg=TEXT)
+        self.preview_menu.pack(side="left", padx=6)
+        self._refresh_preview_menu()
+        self.preview_mode_var.trace_add("write", lambda *args: self._set_preview_mode(self.preview_mode_var.get()))
+
+        verify_row = tk.Frame(self.root, bg=BG); verify_row.pack(fill="x", padx=8, pady=(0,2))
+        self.verify_var = tk.BooleanVar(value=self.verify_enabled)
+        self.chk_verify = tk.Checkbutton(verify_row, text=T("verify_candidates"), variable=self.verify_var, command=self._toggle_verify_enabled, bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT, selectcolor=PANEL, font=f_alt(9))
+        self.chk_verify.pack(side="left")
+
+        self.preview_frame = tk.Frame(self.root, bg=BG, height=140)
+        self.preview_frame.pack(fill="x", padx=8, pady=(0,4))
+        self.preview_frame.pack_propagate(False)
+        self.preview_label = tk.Label(self.preview_frame, text="", bg=PANEL, fg=MUTED, font=f_mono(8), anchor="center")
+        self.preview_label.pack(fill="both", expand=True)
+        if self.preview_mode == "none":
+            self._clear_preview_widget()
+
         val_frame = tk.Frame(self.root, bg=BG); val_frame.pack(fill="x", padx=8, pady=(2,0))
         self.lbl_value = tk.Label(val_frame, text=T("value"), bg=BG, fg=MUTED, font=f_ui(8)); self.lbl_value.pack(anchor="w")
         self.val_label = tk.Label(val_frame, text="—", bg=BG, fg=ACCENT, font=f_mono(22, "bold"), anchor="w"); self.val_label.pack(fill="x")
@@ -1703,6 +1921,8 @@ class App:
         self.btn_apply = tk.Button(manual, text=T("apply"), bg=ACCENT, fg=BG, relief="solid", bd=1, highlightbackground=BORDER, command=self.apply_manual, font=f_ui(9, "bold")); self.btn_apply.pack(side="left")
 
         self.info_label = tk.Label(self.root, text=T("scanning"), bg=BG, fg=MUTED, font=f_alt(9), anchor="w", justify="left"); self.info_label.pack(fill="x", padx=8, pady=(0,2))
+        self.verify_label = tk.Label(self.root, text="", bg=BG, fg=MUTED, font=f_mono(8), anchor="w", justify="left", wraplength=680)
+        self.verify_label.pack(fill="x", padx=8, pady=(0,2))
         self.history_hint_label = tk.Label(self.root, text=T("click_history_hint"), bg=BG, fg=MUTED, font=f_alt(8), anchor="w", justify="left")
         self.history_hint_label.pack(fill="x", padx=8, pady=(0,4))
         self.result_frame = tk.Frame(self.root, bg=BG); self.result_frame.pack(fill="x", padx=8, pady=(0,8))
@@ -1720,6 +1940,9 @@ class App:
 
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True); self.monitor_thread.start()
         self._register_app_hotkeys()
+        self._ui_after(100, self._ensure_overlay_visible)
+        self._ui_after(150, self._show_overlay)
+        self._ui_after(800, self._force_debug_overlay)
         self._ui_after(200, self._ensure_overlay_height)
         self._ui_after(500, self._cleanup_old_detections)
         self._ui_after(1200, self._keep_window_alive)
@@ -2204,7 +2427,14 @@ class App:
         while self.running:
             try:
                 img = capture_region(self.region)
-                raw = read_number(img, self.lookup, self.active_modes)
+                self._show_preview(img)
+                raw, raw_candidates, validated = _read_number_internal(img, self.lookup, self.active_modes)
+                if self.verify_enabled:
+                    raw_set = ", ".join(sorted(set(raw_candidates))) if raw_candidates else "—"
+                    val_set = ", ".join(sorted(set(validated))) if validated else "—"
+                    self._ui_call(lambda r=raw_set, v=val_set: _safe_widget_call(self.verify_label, lambda: self.verify_label.config(text=f"OCR raw: {r}  |  valid: {v}")))
+                else:
+                    self._ui_call(lambda: _safe_widget_call(self.verify_label, lambda: self.verify_label.config(text="")))
                 self.history.append(raw)
                 if len(self.history) > HISTORY_SIZE: self.history.pop(0)
                 valid = [v for v in self.history if v is not None]
