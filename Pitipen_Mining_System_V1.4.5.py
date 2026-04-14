@@ -15,9 +15,13 @@ import csv
 import json
 import base64
 import difflib
+import hashlib
 import os
 import re
 import sqlite3
+import logging
+import shutil
+import warnings
 import threading
 import time
 import webbrowser
@@ -27,6 +31,17 @@ import cv2
 import mss
 import numpy as np
 import pytesseract
+from pytesseract import Output as _TESS_OUTPUT
+try:
+    from paddleocr import PaddleOCR
+    _PADDLE_IMPORT_ERROR = None
+except Exception as _paddle_import_err:
+    PaddleOCR = None
+    _PADDLE_IMPORT_ERROR = _paddle_import_err
+try:
+    import keyring
+except Exception:
+    keyring = None
 import requests
 import tkinter as tk
 from tkinter import messagebox
@@ -47,6 +62,40 @@ UEX_API_BASE = "https://api.uexcorp.space/2.0"
 UEX_CACHE_TTL = 12 * 60 * 60
 UEX_HTTP_TIMEOUT = 15
 SUPPORT_PROMPT_INTERVAL = 5
+
+OPENAI_API_URL = "https://api.openai.com/v1/responses"
+OPENAI_REQUEST_TIMEOUT = 20
+OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
+OPENAI_KEYRING_SERVICE = "pitipen-mining-system"
+OPENAI_KEYRING_USER = "openai_api_key"
+
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_REQUEST_TIMEOUT = 20
+GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+GEMINI_KEYRING_SERVICE = "pitipen-mining-system"
+GEMINI_KEYRING_USER = "gemini_api_key"
+
+PPLX_API_URL = "https://api.perplexity.ai/v1/agent"
+PPLX_REQUEST_TIMEOUT = 20
+PPLX_DEFAULT_MODEL = "openai/gpt-5-mini"
+PPLX_KEYRING_SERVICE = "pitipen-mining-system"
+PPLX_KEYRING_USER = "perplexity_api_key"
+
+AI_PROVIDERS = ["openai", "gemini", "perplexity"]
+AI_PROVIDER_LABELS = {"openai": "OpenAI", "gemini": "Gemini", "perplexity": "Perplexity"}
+DEFAULT_AI_PROVIDER = "openai"
+
+AI_DEFAULT_PROMPT = (
+    "You are reading the Star Citizen mining HUD contents list.\n"
+    "Return JSON only in this exact shape:\n"
+    "{\"rows\":[{\"pct\":\"5.42\",\"name\":\"IRON (ORE)\",\"quality\":\"543\"}]}\n"
+    "Rules:\n"
+    "- pct is numeric without %\n"
+    "- name is the material name as seen\n"
+    "- quality is the right-column number\n"
+    "- keep top-to-bottom order\n"
+    "- if nothing is found, return {\"rows\":[]}\n"
+)
 
 PAYPAL_URL = ""
 DISCORD_URL = ""
@@ -90,6 +139,7 @@ UEX_DB_FILE = _BASE_DIR / "uex_cache.sqlite3"
 
 # Archivo de log OCR junto al exe para diagnóstico en producción
 OCR_LOG_FILE = _BASE_DIR / "ocr_debug.log"
+SAMPLE_TEMPLATE_FILE = _BASE_DIR / "ocr_sample_template.csv"
 
 SUPPORTED_LANGS = ["es", "en", "fr", "de", "ru"]
 LANG = "en"
@@ -125,6 +175,7 @@ DEFAULT_CALIBRATION_HOTKEY = "F8"
 DEFAULT_SHOW_OVERLAY_HOTKEY = "F7"
 HOTKEY_OPTIONS = ["F6", "F7", "F8", "F9", "F10"]
 PREVIEW_MODES = ["none", "raw", "processed"]
+PADDLE_USE_PREDICT = False
 
 
 TEXTS = {
@@ -168,6 +219,8 @@ TEXTS = {
     "active_modes":{"es":"Modos activos:","en":"Active modes:","fr":"Modes actifs :","de":"Aktive Modi:","ru":"Активные режимы:"},
     "invalid_fast_read":{"es":"Lectura rápida no validada:","en":"Fast unvalidated read:","fr":"Lecture rapide non validée :","de":"Schnelle ungültige Lesung:","ru":"Быстрое неподтверждённое чтение:"},
     "ocr_error":{"es":"Error OCR:","en":"OCR error:","fr":"Erreur OCR :","de":"OCR-Fehler:","ru":"Ошибка OCR:"},
+    "ocr_mode_fast":{"es":"OCR: Fast","en":"OCR: Fast","fr":"OCR: Fast","de":"OCR: Fast","ru":"OCR: Fast"},
+    "ocr_mode_high":{"es":"OCR: High Accuracy","en":"OCR: High Accuracy","fr":"OCR: High Accuracy","de":"OCR: High Accuracy","ru":"OCR: High Accuracy"},
     "no_new_detection_30s":{"es":"Sin nuevas detecciones en 30 s.","en":"No new detections in 30 s.","fr":"Aucune nouvelle détection en 30 s.","de":"Keine neuen Erkennungen seit 30 s.","ru":"Нет новых обнаружений за 30 с."},
     "consulting_market":{"es":"Consultando mercado:","en":"Checking market:","fr":"Consultation du marché :","de":"Markt wird geprüft:","ru":"Проверка рынка:"},
     "market_cache_sqlite":{"es":"caché SQLite 12h","en":"SQLite cache 12h","fr":"cache SQLite 12h","de":"SQLite-Cache 12h","ru":"кэш SQLite 12ч"},
@@ -175,6 +228,14 @@ TEXTS = {
     "uex_settings":{"es":"UEX Market","en":"UEX Market","fr":"Marché UEX","de":"UEX-Markt","ru":"Рынок UEX"},
     "enable_market":{"es":"Activar precios de mercado","en":"Enable market prices","fr":"Activer les prix du marché","de":"Marktpreise aktivieren","ru":"Включить рыночные цены"},
     "token":{"es":"Token UEX","en":"UEX token","fr":"Jeton UEX","de":"UEX-Token","ru":"Токен UEX"},
+    "ai_settings":{"es":"OCR con IA","en":"AI OCR","fr":"OCR IA","de":"KI OCR","ru":"AI OCR"},
+    "ai_enable":{"es":"Usar IA para contenidos","en":"Use AI for contents","fr":"Utiliser l'IA pour le contenu","de":"KI für Inhalte verwenden","ru":"Использовать ИИ для содержимого"},
+    "ai_provider":{"es":"Proveedor IA","en":"AI provider","fr":"Fournisseur IA","de":"KI-Anbieter","ru":"Провайдер ИИ"},
+    "ai_model":{"es":"Modelo IA","en":"AI model","fr":"Modèle IA","de":"KI-Modell","ru":"Модель ИИ"},
+    "ai_key":{"es":"Clave IA","en":"AI key","fr":"Clé IA","de":"KI-Schlüssel","ru":"Ключ ИИ"},
+    "ai_saved":{"es":"Clave guardada","en":"Key saved","fr":"Clé enregistrée","de":"Schlüssel gespeichert","ru":"Ключ сохранён"},
+    "ai_not_set":{"es":"Clave no configurada","en":"Key not set","fr":"Clé non configurée","de":"Schlüssel nicht gesetzt","ru":"Ключ не задан"},
+    "ai_keyring_missing":{"es":"Sin keyring: la clave no se guardará", "en":"No keyring: key will not be saved", "fr":"Pas de keyring : la clé ne sera pas enregistrée", "de":"Kein Keyring: Schlüssel wird nicht gespeichert", "ru":"Нет keyring: ключ не будет сохранён"},
     "save":{"es":"Guardar","en":"Save","fr":"Enregistrer","de":"Speichern","ru":"Сохранить"},
     "test":{"es":"Probar","en":"Test","fr":"Tester","de":"Testen","ru":"Проверить"},
     "show":{"es":"Mostrar","en":"Show","fr":"Afficher","de":"Anzeigen","ru":"Показать"},
@@ -226,6 +287,7 @@ TEXTS = {
     "rock":{"label_key":"rock_details","fallback":"Rock details","color":TEXT},
     "rock_details":{"es":"Detalles de roca","en":"Rock details","fr":"D?tails de roche","de":"Gesteinsdetails","ru":"Rock details"},
     "calibrate_rock":{"es":"? CALIBRAR ROCA","en":"? CALIBRATE ROCK","fr":"? CALIBRER ROCHER","de":"? GESTEIN KALIBRIEREN","ru":"? CALIBRATE ROCK"},
+    "run_rock_calibration":{"es":"? EJECUTAR CALIBRACIÃ“N ROCA","en":"? RUN ROCK CALIBRATION","fr":"? LANCER CALIBRATION ROCHE","de":"? KALIBRIERUNG ROCHER AUSFÃœHREN","ru":"? RUN ROCK CALIBRATION"},
     "rock_panel":{"es":"ROCA","en":"ROCK","fr":"ROCHE","de":"GESTEIN","ru":"ROCK"},
     "rock_missing_calibration":{"es":"Calibra la zona de roca antes de iniciar este modo.","en":"Calibrate the rock panel area before starting this mode.","fr":"Calibrez la zone de roche avant de d?marrer ce mode.","de":"Kalibriere den Gesteinsbereich, bevor du diesen Modus startest.","ru":"Calibrate the rock panel area before starting this mode."},
     "rock_scanning":{"es":"Escaneando roca...","en":"Scanning rock...","fr":"Analyse de la roche...","de":"Gestein wird gescannt...","ru":"Scanning rock..."},
@@ -246,6 +308,7 @@ TEXTS = {
     "rock_ocr_adaptive":{"es":"Adaptativo","en":"Adaptive","fr":"Adaptatif","de":"Adaptiv","ru":"Adaptive"},
     "rock_ocr_color":{"es":"Color","en":"Color","fr":"Couleur","de":"Farbe","ru":"Color"},
     "rock_preview_zoom":{"es":"Zoom vista roca","en":"Rock preview zoom","fr":"Zoom aper?u roche","de":"Gestein Vorschau Zoom","ru":"Rock preview zoom"},
+    "rock_quality_crop":{"es":"Mostrar recorte calidad","en":"Show quality crop","fr":"Afficher recadrage qualit?","de":"Qualit?tsausschnitt zeigen","ru":"Show quality crop"},
     "calibration_hotkey":{"es":"Atajo calibración","en":"Calibration hotkey","fr":"Raccourci calibration","de":"Kalibrierungs-Hotkey","ru":"Горячая клавиша калибровки"},
     "hotkey_saved":{"es":"Atajo guardado","en":"Hotkey saved","fr":"Raccourci enregistré","de":"Hotkey gespeichert","ru":"Горячая клавиша сохранена"},
     "hotkeys_unavailable":{"es":"Hotkeys no disponibles","en":"Hotkeys unavailable","fr":"Raccourcis indisponibles","de":"Hotkeys nicht verfügbar","ru":"Горячие клавиши недоступны"},
@@ -363,9 +426,13 @@ def fetch_version_info(timeout=5):
 # ---------------------------------------------------------------------------
 # Logging OCR para diagnóstico en producción (escribe en ocr_debug.log)
 # ---------------------------------------------------------------------------
+_CURRENT_ROCK_MODE = None
+
 def _ocr_log(msg):
-    """Escribe una línea de log OCR en ocr_debug.log junto al exe."""
+    """Escribe una l??nea de log OCR en ocr_debug.log junto al exe."""
     try:
+        if _CURRENT_ROCK_MODE and msg.startswith("[rock"):
+            msg = f"{msg} [mode={_CURRENT_ROCK_MODE}]"
         with open(OCR_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     except Exception:
@@ -497,6 +564,16 @@ def _build_tess_config(oem=1):
     parts.append("-c tessedit_char_whitelist=0123456789")
     return " ".join(parts)
 
+def _build_tess_config_hud(oem=1):
+    parts = []
+    if TESSDATA_DIR:
+        safe_tessdata = Path(TESSDATA_DIR).as_posix()
+        parts.append(f'--tessdata-dir {safe_tessdata}')
+    parts.append("--psm 7")
+    parts.append(f"--oem {oem}")
+    parts.append("-c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ%.:")
+    return " ".join(parts)
+
 def _build_tess_config_text(oem=1):
     parts = []
     if TESSDATA_DIR:
@@ -545,6 +622,7 @@ def _build_tess_config_quality(oem=1, psm=6):
 # El fallback legacy (--oem 0) se desactiva porque suele fallar
 # cuando el paquete de idiomas no incluye los datos del motor clásico.
 TESS_CONFIG      = _build_tess_config(1)
+HUD_TESS_CONFIG  = _build_tess_config_hud(1)
 TESS_CONFIG_FALL = TESS_CONFIG
 ROCK_TESS_CONFIG = _build_tess_config_text(1)
 ROCK_NAME_TESS_CONFIG = _build_tess_config_name(1)
@@ -561,6 +639,478 @@ try:
 except Exception as e:
     _ocr_log(f"[tesseract] ERROR REAL al validar instalación: {e}")
 
+
+PADDLE_ENGINE = None
+PADDLE_INIT_ERROR = None
+LAST_OCR_ENGINE = "tesseract"
+LAST_OCR_CONF = 0.0
+SAMPLE_TEMPLATE = {}
+
+def _purge_paddle_debug():
+    try:
+        out_dir = _BASE_DIR / "paddle_debug"
+        if out_dir.exists() and out_dir.is_dir():
+            shutil.rmtree(out_dir)
+        out_dir.mkdir(exist_ok=True)
+    except Exception as e:
+        _ocr_log(f"[paddle] debug purge error: {e}")
+
+def _sample_expected_for_label(label):
+    if not label or not SAMPLE_TEMPLATE:
+        return ""
+    key = str(label).strip().lower()
+    # Map known labels to sample keys
+    if key in ("name", "panel_name"):
+        return SAMPLE_TEMPLATE.get("name", "")
+    if key == "stats":
+        parts = [SAMPLE_TEMPLATE.get("mass",""), SAMPLE_TEMPLATE.get("res",""), SAMPLE_TEMPLATE.get("inst","")]
+        return " ".join([p for p in parts if p]).strip()
+    if key in ("mass", "res", "inst", "comp"):
+        return SAMPLE_TEMPLATE.get(key, "")
+    if key.startswith("row_name_"):
+        idx = key.replace("row_name_", "")
+        return SAMPLE_TEMPLATE.get(f"row{idx}_name", "")
+    if key.startswith("percent_row_"):
+        idx = key.replace("percent_row_", "")
+        return SAMPLE_TEMPLATE.get(f"row{idx}_pct", "")
+    if key.startswith("quality_row_"):
+        idx = key.replace("quality_row_", "")
+        return SAMPLE_TEMPLATE.get(f"row{idx}_quality", "")
+    return SAMPLE_TEMPLATE.get(key, "")
+
+def _score_text_against_sample(text, expected):
+    if not expected:
+        return 0.0
+    if not text:
+        return 0.0
+    t = re.sub(r"\\s+", "", str(text).upper())
+    e = re.sub(r"\\s+", "", str(expected).upper())
+    if not e:
+        return 0.0
+    if not any(ch.isalnum() for ch in t):
+        return 0.0
+    if t == e:
+        return 1.0
+    return difflib.SequenceMatcher(None, t, e).ratio()
+
+def _scale_img(img, scale):
+    try:
+        if scale is None or abs(scale - 1.0) < 0.01:
+            return img
+        h, w = img.shape[:2]
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        # Respect Paddle's max_side_limit (default 4000)
+        max_side = 4000
+        max_dim = max(new_w, new_h)
+        if max_dim > max_side:
+            factor = max_side / float(max_dim)
+            new_w = max(1, int(new_w * factor))
+            new_h = max(1, int(new_h * factor))
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+    except Exception:
+        return img
+
+def _benchmark_field(field_key, crop, expected, tess_config, require_pattern=None, progress_cb=None):
+    modes = ["gray", "adaptive", "bright", "color"]
+    scales = [1.0, 1.5, 2.0]
+    mode_rank = {m:i for i,m in enumerate(modes)}
+    best = {"score": -1.0, "engine": None, "mode": None, "scale": None, "text": ""}
+    # Tesseract first
+    for mode in modes:
+        for scale in scales:
+            if progress_cb:
+                progress_cb(field_key, "tesseract", mode, scale)
+            img = _scale_img(crop, scale)
+            proc = _rock_preprocess(img, mode)
+            if len(proc.shape) == 3:
+                proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+            text, _ = _tesseract_text_and_conf(proc, tess_config)
+            if require_pattern and not re.search(require_pattern, text or "", re.IGNORECASE):
+                pass
+            score = _score_text_against_sample(text, expected)
+            if score > best["score"]:
+                best = {"score": score, "engine": "tesseract", "mode": mode, "scale": scale, "text": text}
+            elif abs(score - best["score"]) < 1e-6:
+                # Tie-break: prefer tesseract, then cheaper mode, then smaller scale
+                if best["engine"] != "tesseract":
+                    best = {"score": score, "engine": "tesseract", "mode": mode, "scale": scale, "text": text}
+                elif mode_rank.get(mode, 99) < mode_rank.get(best["mode"], 99) or (mode == best["mode"] and scale < (best["scale"] or 99)):
+                    best = {"score": score, "engine": "tesseract", "mode": mode, "scale": scale, "text": text}
+    # Paddle
+    for mode in modes:
+        for scale in scales:
+            if progress_cb:
+                progress_cb(field_key, "paddle", mode, scale)
+            img = _scale_img(crop, scale)
+            text, _ = _paddle_extract_text_and_conf(img, label=field_key)
+            if require_pattern and not re.search(require_pattern, text or "", re.IGNORECASE):
+                pass
+            score = _score_text_against_sample(text, expected)
+            if score > best["score"]:
+                best = {"score": score, "engine": "paddle", "mode": mode, "scale": scale, "text": text}
+            elif abs(score - best["score"]) < 1e-6:
+                # Tie-breaker: prefer tesseract over paddle
+                if best["engine"] == "paddle" and score > 0:
+                    best = {"score": score, "engine": "tesseract", "mode": mode, "scale": scale, "text": text}
+                elif best["engine"] == "paddle":
+                    if mode_rank.get(mode, 99) < mode_rank.get(best["mode"], 99) or (mode == best["mode"] and scale < (best["scale"] or 99)):
+                        best = {"score": score, "engine": "paddle", "mode": mode, "scale": scale, "text": text}
+    return best
+
+def _run_rock_calibration(panel_img, boxes, sample, progress_cb=None):
+    if panel_img is None or not boxes or not sample:
+        return {}
+    cal = {}
+    try:
+        h, w = panel_img.shape[:2]
+        def _box_to_int(b):
+            x1, y1, x2, y2 = b
+            # normalize if floats in [0,1]
+            if 0 <= x1 <= 1 and 0 <= x2 <= 1:
+                x1 = int(x1 * w); x2 = int(x2 * w)
+            if 0 <= y1 <= 1 and 0 <= y2 <= 1:
+                y1 = int(y1 * h); y2 = int(y2 * h)
+            return int(x1), int(y1), int(x2), int(y2)
+
+        def _crop(key):
+            x1, y1, x2, y2 = _box_to_int(boxes.get(key, (0, 0, w, h)))
+            return panel_img[y1:y2, x1:x2]
+
+        # Core fields
+        stats_expected = " ".join([sample.get("mass",""), sample.get("res",""), sample.get("inst","")]).strip()
+        cal["name"] = _benchmark_field("name", _crop("name"), sample.get("name",""), ROCK_NAME_TESS_CONFIG, r"[A-Z]", progress_cb)
+        cal["stats"] = _benchmark_field("stats", _crop("stats"), stats_expected, ROCK_NUM_TESS_CONFIG, r"\\d", progress_cb)
+        cal["comp"] = _benchmark_field("comp", _crop("comp"), sample.get("comp",""), ROCK_NUM_TESS_CONFIG, r"\\d", progress_cb)
+
+        # Rows
+        table = _crop("table")
+        th, tw = table.shape[:2]
+        row_box = boxes.get("row")
+        row_h = None
+        if row_box:
+            _, ry1, _, ry2 = row_box
+            row_h = max(6, int(ry2 - ry1))
+        row_count = 0
+        if str(sample.get("row_count","")).isdigit():
+            row_count = int(sample.get("row_count"))
+        if row_count == 0:
+            for k in sample.keys():
+                if k.startswith("row") and k.endswith("_pct"):
+                    row_count = max(row_count, int(k.replace("row","").replace("_pct","") or 0))
+        if row_count == 0 and row_h:
+            row_count = max(1, int((th + row_h - 1) / row_h))
+        if row_h is None:
+            row_h = max(8, int(th / max(1, row_count)))
+
+        # Percent/quality column bounds
+        tbox = _box_to_int(boxes.get("table", (0, 0, w, h)))
+        p1, py1, p2, py2 = _box_to_int(boxes.get("percent", (0, 0, int(tw * 0.30), th)))
+        q1, qy1, q2, qy2 = _box_to_int(boxes.get("quality", (int(tw * 0.70), 0, tw, th)))
+        p_left = max(0, p1 - tbox[0]); p_right = min(tw, p2 - tbox[0])
+        q_left = max(0, q1 - tbox[0]); q_right = min(tw, q2 - tbox[0])
+
+        for i in range(row_count):
+            y0 = i * row_h
+            y1 = min(th, (i + 1) * row_h)
+            if y1 <= y0:
+                continue
+            row_img = table[y0:y1, :]
+            pct_img = row_img[:, p_left:p_right]
+            name_img = row_img[:, p_right:q_left] if q_left > p_right else row_img
+            qual_img = row_img[:, q_left:q_right] if q_right > q_left else row_img[:, int(tw*0.7):tw]
+
+            key = i + 1
+            cal[f"row_name_{key}"] = _benchmark_field(
+                f"row_name_{key}", name_img, sample.get(f"row{key}_name",""), ROCK_NAME_TESS_CONFIG, r"[A-Z]", progress_cb
+            )
+            cal[f"percent_row_{key}"] = _benchmark_field(
+                f"percent_row_{key}", pct_img, sample.get(f"row{key}_pct",""), ROCK_NUM_TESS_CONFIG, r"\\d", progress_cb
+            )
+            cal[f"quality_row_{key}"] = _benchmark_field(
+                f"quality_row_{key}", qual_img, sample.get(f"row{key}_quality",""), ROCK_QUALITY_TESS_CONFIG_LINE, r"\\d", progress_cb
+            )
+    except Exception as e:
+        _ocr_log(f"[calibration] run error: {e}")
+    try:
+        for k, v in cal.items():
+            if isinstance(v, dict):
+                _ocr_log(f"[calibration] {k} -> {v.get('engine','')} {v.get('mode','')} scale={v.get('scale','')}")
+    except Exception:
+        pass
+    return cal
+
+def _ocr_with_calibration(field_key, crop, tess_config, require_pattern, default_mode, calib):
+    try:
+        mode = calib.get("mode", default_mode)
+        scale = calib.get("scale", 1.0)
+        engine = calib.get("engine", "tesseract")
+        img = _scale_img(crop, scale)
+        if engine == "paddle":
+            text, _ = _paddle_extract_text_and_conf(img, label=field_key)
+            return text or ""
+        # Tesseract path
+        proc = _rock_preprocess(img, mode)
+        if len(proc.shape) == 3:
+            proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        text, _ = _tesseract_text_and_conf(proc, tess_config)
+        return text or ""
+    except Exception:
+        return ""
+
+def _upscale_for_paddle(img, factor=None):
+    try:
+        h, w = img.shape[:2]
+        if factor is None:
+            base = int(get_ocr_profile().get("upscale", 4))
+            factor = max(6, min(12, base * 2 + 2))
+        new_w = w * factor
+        new_h = h * factor
+        max_side = 4000
+        max_dim = max(new_w, new_h)
+        if max_dim > max_side:
+            factor2 = max_side / float(max_dim)
+            new_w = max(1, int(new_w * factor2))
+            new_h = max(1, int(new_h * factor2))
+        return cv2.resize(img, (int(new_w), int(new_h)), interpolation=cv2.INTER_CUBIC)
+    except Exception:
+        return img
+
+
+def _init_paddleocr():
+    global PADDLE_ENGINE, PADDLE_INIT_ERROR
+    if PaddleOCR is None:
+        if _PADDLE_IMPORT_ERROR:
+            _ocr_log(f"[paddle] import error: {_PADDLE_IMPORT_ERROR}")
+        return None
+    try:
+        logging.getLogger("ppocr").setLevel(logging.ERROR)
+        warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*predict.*")
+        PADDLE_ENGINE = PaddleOCR(lang="en", ocr_version="PP-OCRv4")
+        _ocr_log("[paddle] initialized successfully (PP-OCRv4)")
+        return PADDLE_ENGINE
+    except Exception as e:
+        PADDLE_INIT_ERROR = str(e)
+        _ocr_log(f"[paddle] init error: {e}")
+        PADDLE_ENGINE = None
+        return None
+
+def _paddle_self_test():
+    try:
+        if PADDLE_ENGINE is None:
+            return
+        img = np.zeros((180, 520, 3), dtype=np.uint8)
+        cv2.putText(img, "PADDLE TEST 123", (8, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.6, (255, 255, 255), 3, cv2.LINE_AA)
+        text, conf = _paddle_extract_text_and_conf(img, label="selftest")
+        if text:
+            _ocr_log(f"[paddle] selftest ok text='{text[:48]}' conf={conf:.1f}")
+        else:
+            _ocr_log("[paddle] selftest no_text")
+    except Exception as e:
+        _ocr_log(f"[paddle] selftest error: {e}")
+
+def _bw_hash_image(img):
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+        _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        small = cv2.resize(bw, (64, 64), interpolation=cv2.INTER_AREA)
+        return hashlib.md5(small.tobytes()).hexdigest()
+    except Exception:
+        return ""
+
+def _has_any_text_fast(img):
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+        data = pytesseract.image_to_data(gray, config="--psm 6", output_type=_TESS_OUTPUT.DICT)
+        n = len(data.get("text", []))
+        for i in range(n):
+            txt = (data["text"][i] or "").strip()
+            conf = data["conf"][i]
+            if not txt:
+                continue
+            try:
+                if int(conf) >= 30:
+                    return True
+            except Exception:
+                return True
+        return False
+    except Exception:
+        return False
+
+def _openai_extract_text(resp_json):
+    try:
+        if isinstance(resp_json, dict):
+            if resp_json.get("output_text"):
+                return str(resp_json.get("output_text"))
+            out = resp_json.get("output")
+            texts = []
+            if isinstance(out, list):
+                for item in out:
+                    if not isinstance(item, dict):
+                        continue
+                    content = item.get("content", [])
+                    if isinstance(content, list):
+                        for c in content:
+                            if isinstance(c, dict):
+                                if c.get("text"):
+                                    texts.append(str(c.get("text")))
+                                elif c.get("output_text"):
+                                    texts.append(str(c.get("output_text")))
+            if texts:
+                return "\n".join(texts)
+    except Exception:
+        pass
+    return ""
+
+def _openai_parse_rows_from_text(text, provider="openai"):
+    if not text:
+        return []
+    raw = text.strip()
+    payload = None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end > start:
+                payload = json.loads(raw[start:end + 1])
+        except Exception:
+            payload = None
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return []
+    cleaned = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        pct = str(row.get("pct", "")).replace("%", "").strip()
+        name = str(row.get("name", "")).strip()
+        quality = str(row.get("quality", "")).strip()
+        if not (pct or name or quality):
+            continue
+        cleaned.append({"pct": pct, "name": name, "quality": quality, "engine": provider})
+    return cleaned
+
+def _get_ai_prompt_from_config():
+    try:
+        if ROCK_CONFIG_FILE.exists():
+            payload = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                prompt = payload.get("ai_prompt") or payload.get("openai_prompt")
+                if isinstance(prompt, str) and prompt.strip():
+                    return prompt.strip()
+    except Exception:
+        pass
+    return AI_DEFAULT_PROMPT
+
+def _openai_contents_rows(table_img, table_text):
+    global AI_LAST_BW_HASH
+    if not load_ai_enabled():
+        return []
+    provider = load_ai_provider()
+    api_key = _get_ai_api_key(provider)
+    if not api_key:
+        _ocr_log(f"[ai-{provider}] skip: key not set")
+        return []
+    if table_img is None or table_img.size == 0:
+        return []
+    bw_hash = _bw_hash_image(table_img)
+    if bw_hash and bw_hash == AI_LAST_BW_HASH:
+        _ocr_log(f"[ai-{provider}] skip: table unchanged")
+        return []
+    AI_LAST_BW_HASH = bw_hash
+    if not (table_text and re.search(r"[A-Z0-9]", table_text, re.IGNORECASE)):
+        if not _has_any_text_fast(table_img):
+            _ocr_log(f"[ai-{provider}] skip: no text detected")
+            return []
+    try:
+        ok, buf = cv2.imencode(".png", table_img)
+        if not ok:
+            return []
+        b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+    except Exception as e:
+        _ocr_log(f"[ai-{provider}] encode error: {e}")
+        return []
+    prompt = _get_ai_prompt_from_config()
+    try:
+        if provider == "gemini":
+            model = load_ai_model(provider)
+            url = f"{GEMINI_API_BASE}/{model}:generateContent"
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"text": prompt},
+                        {"inline_data": {"mime_type": "image/png", "data": b64}},
+                    ]
+                }]
+            }
+            headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+            resp = requests.post(url, headers=headers, json=payload, timeout=GEMINI_REQUEST_TIMEOUT)
+            if resp.status_code >= 400:
+                _ocr_log(f"[ai-{provider}] error status={resp.status_code} body={resp.text[:160]}")
+                return []
+            data = resp.json()
+            text_parts = []
+            for cand in data.get("candidates", []) or []:
+                content = cand.get("content", {})
+                for part in content.get("parts", []) or []:
+                    if isinstance(part, dict) and part.get("text"):
+                        text_parts.append(str(part.get("text")))
+            text = "\n".join(text_parts).strip()
+            rows = _openai_parse_rows_from_text(text, provider=provider)
+        else:
+            model = load_ai_model(provider)
+            url = OPENAI_API_URL if provider == "openai" else PPLX_API_URL
+            payload = {
+                "model": model,
+                "input": [{
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }, {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"},
+                    ],
+                }],
+            }
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            timeout = OPENAI_REQUEST_TIMEOUT if provider == "openai" else PPLX_REQUEST_TIMEOUT
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code >= 400:
+                _ocr_log(f"[ai-{provider}] error status={resp.status_code} body={resp.text[:160]}")
+                return []
+            data = resp.json()
+            text = _openai_extract_text(data)
+            rows = _openai_parse_rows_from_text(text, provider=provider)
+        if rows:
+            _ocr_log(f"[ai-{provider}] rows={len(rows)}")
+        else:
+            _ocr_log(f"[ai-{provider}] empty rows")
+        return rows
+    except Exception as e:
+        _ocr_log(f"[ai-{provider}] request error: {e}")
+        return []
+
+def _rock_table_hash(img):
+    try:
+        h, w = img.shape[:2]
+        boxes = rock_boxes_for_shape(h, w)
+        if not boxes or "table" not in boxes:
+            return ""
+        tx1, ty1, tx2, ty2 = boxes.get("table", (0, 0, w, h))
+        table_img = img[ty1:ty2, tx1:tx2]
+        if table_img is None or table_img.size == 0:
+            return ""
+        return _bw_hash_image(table_img)
+    except Exception:
+        return ""
 
 def f_ui(size, weight="normal"): return (FONT_UI, size, weight)
 def f_alt(size, weight="normal"): return (FONT_ALT, size, weight)
@@ -583,6 +1133,214 @@ def load_prefs():
 def save_prefs(prefs):
     try: PREFS_FILE.write_text(json.dumps(prefs, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception: pass
+
+AI_KEY_MEM = {"openai": "", "gemini": "", "perplexity": ""}
+AI_LAST_BW_HASH = None
+
+def _hash_key(value):
+    if not value:
+        return ""
+    try:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
+def load_ai_enabled():
+    prefs = load_prefs()
+    if "__ai_enabled__" in prefs:
+        return bool(prefs.get("__ai_enabled__", False))
+    return bool(prefs.get("__openai_enabled__", False))
+
+def save_ai_enabled(enabled):
+    prefs = load_prefs()
+    prefs["__ai_enabled__"] = bool(enabled)
+    save_prefs(prefs)
+
+def load_ai_provider():
+    prefs = load_prefs()
+    provider = str(prefs.get("__ai_provider__", DEFAULT_AI_PROVIDER)).strip().lower()
+    return provider if provider in AI_PROVIDERS else DEFAULT_AI_PROVIDER
+
+def save_ai_provider(provider):
+    prefs = load_prefs()
+    provider = str(provider).strip().lower()
+    prefs["__ai_provider__"] = provider if provider in AI_PROVIDERS else DEFAULT_AI_PROVIDER
+    save_prefs(prefs)
+
+def _model_pref_key(provider):
+    return f"__ai_model_{provider}__"
+
+def load_ai_model(provider):
+    prefs = load_prefs()
+    provider = str(provider).strip().lower()
+    key = _model_pref_key(provider)
+    if provider == "gemini":
+        default = GEMINI_DEFAULT_MODEL
+    elif provider == "perplexity":
+        default = PPLX_DEFAULT_MODEL
+    else:
+        default = OPENAI_DEFAULT_MODEL
+    return str(prefs.get(key, default)).strip() or default
+
+def save_ai_model(provider, model):
+    prefs = load_prefs()
+    provider = str(provider).strip().lower()
+    key = _model_pref_key(provider)
+    prefs[key] = str(model).strip()
+    save_prefs(prefs)
+
+def _key_hash_pref_key(provider):
+    return f"__ai_key_hash_{provider}__"
+
+def load_ai_key_hash(provider):
+    prefs = load_prefs()
+    return str(prefs.get(_key_hash_pref_key(provider), "")).strip()
+
+def save_ai_key_hash(provider, key):
+    prefs = load_prefs()
+    prefs[_key_hash_pref_key(provider)] = _hash_key(key)
+    save_prefs(prefs)
+
+def _get_ai_api_key(provider):
+    provider = str(provider).strip().lower()
+    cached = AI_KEY_MEM.get(provider, "")
+    if cached:
+        return cached
+    if keyring is not None:
+        try:
+            if provider == "gemini":
+                stored = keyring.get_password(GEMINI_KEYRING_SERVICE, GEMINI_KEYRING_USER)
+            elif provider == "perplexity":
+                stored = keyring.get_password(PPLX_KEYRING_SERVICE, PPLX_KEYRING_USER)
+            else:
+                stored = keyring.get_password(OPENAI_KEYRING_SERVICE, OPENAI_KEYRING_USER)
+            if stored:
+                return stored
+        except Exception:
+            pass
+    if provider == "gemini":
+        env_key = os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
+    elif provider == "perplexity":
+        env_key = os.environ.get("PERPLEXITY_API_KEY", "").strip() or os.environ.get("PPLX_API_KEY", "").strip()
+    else:
+        env_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    return ""
+
+def _save_ai_api_key(provider, value):
+    provider = str(provider).strip().lower()
+    key = (value or "").strip()
+    AI_KEY_MEM[provider] = key
+    if not key:
+        return False
+    saved = False
+    if keyring is not None:
+        try:
+            if provider == "gemini":
+                keyring.set_password(GEMINI_KEYRING_SERVICE, GEMINI_KEYRING_USER, key)
+            elif provider == "perplexity":
+                keyring.set_password(PPLX_KEYRING_SERVICE, PPLX_KEYRING_USER, key)
+            else:
+                keyring.set_password(OPENAI_KEYRING_SERVICE, OPENAI_KEYRING_USER, key)
+            saved = True
+        except Exception:
+            saved = False
+    save_ai_key_hash(provider, key)
+    return saved
+
+# Back-compat wrappers for renamed AI settings
+def load_openai_enabled():
+    return load_ai_enabled()
+
+def save_openai_enabled(enabled):
+    save_ai_enabled(enabled)
+
+def load_openai_model():
+    return load_ai_model(load_ai_provider())
+
+def save_openai_model(model):
+    save_ai_model(load_ai_provider(), model)
+
+def _get_openai_api_key():
+    return _get_ai_api_key(load_ai_provider())
+
+def _save_openai_api_key(value):
+    return _save_ai_api_key(load_ai_provider(), value)
+
+def _ensure_sample_template():
+    if SAMPLE_TEMPLATE_FILE.exists():
+        return
+    try:
+        _save_sample_template({
+            "name": "IRON (ORE)",
+            "mass": "1132",
+            "res": "0%",
+            "inst": "1.32",
+            "comp": "1.48",
+            "row1_pct": "5.42%",
+            "row1_name": "IRON (ORE)",
+            "row1_quality": "543",
+            "row2_pct": "62.89%",
+            "row2_name": "IRON (ORE)",
+            "row2_quality": "249",
+            "row3_pct": "32.48%",
+            "row3_name": "INERT MATERIALS",
+            "row3_quality": "0",
+        })
+    except Exception as e:
+        _ocr_log(f"[sample] template write error: {e}")
+
+def _load_sample_template():
+    data = {}
+    try:
+        if not SAMPLE_TEMPLATE_FILE.exists():
+            return data
+        with SAMPLE_TEMPLATE_FILE.open("r", encoding="utf-8", errors="ignore") as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+        for row in rows[1:]:
+            if len(row) < 2:
+                continue
+            key = str(row[0]).strip().lower()
+            val = str(row[1]).strip()
+            if key:
+                data[key] = val
+    except Exception as e:
+        _ocr_log(f"[sample] template read error: {e}")
+    return data
+
+def _save_sample_template(data):
+    try:
+        rows = ["key,value"]
+        for k, v in data.items():
+            rows.append(f"{k},{v}")
+        SAMPLE_TEMPLATE_FILE.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    except Exception as e:
+        _ocr_log(f"[sample] template write error: {e}")
+
+def _get_sample_row_count():
+    try:
+        payload = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            sample = payload.get("sample") or {}
+            if isinstance(sample, dict):
+                if str(sample.get("row_count","")).isdigit():
+                    return int(sample.get("row_count"))
+                # fallback count from row*_pct keys
+                count = 0
+                for k in sample.keys():
+                    if str(k).startswith("row") and str(k).endswith("_pct"):
+                        try:
+                            idx = int(str(k).replace("row","").replace("_pct",""))
+                            count = max(count, idx)
+                        except Exception:
+                            pass
+                if count:
+                    return count
+    except Exception:
+        pass
+    return 0
 
 def load_selected_modes():
     prefs = load_prefs()
@@ -630,13 +1388,13 @@ def load_rock_boxes_enabled(): return bool(load_prefs().get("__rock_boxes_enable
 def save_rock_boxes_enabled(enabled):
     prefs = load_prefs(); prefs["__rock_boxes_enabled__"] = bool(enabled); save_prefs(prefs)
 
-ROCK_OCR_MODES = ["gray", "bright", "adaptive", "color"]
+ROCK_OCR_MODES = ["adaptive"]
 def load_rock_ocr_mode():
-    val = str(load_prefs().get("__rock_ocr_mode__", "gray")).lower()
-    return val if val in ROCK_OCR_MODES else "gray"
+    val = str(load_prefs().get("__rock_ocr_mode__", "adaptive")).lower()
+    return val if val in ROCK_OCR_MODES else "adaptive"
 def save_rock_ocr_mode(mode):
     mode = str(mode).lower()
-    prefs = load_prefs(); prefs["__rock_ocr_mode__"] = mode if mode in ROCK_OCR_MODES else "gray"; save_prefs(prefs)
+    prefs = load_prefs(); prefs["__rock_ocr_mode__"] = mode if mode in ROCK_OCR_MODES else "adaptive"; save_prefs(prefs)
 
 def load_rock_preview_zoom():
     try:
@@ -651,6 +1409,10 @@ def save_rock_preview_zoom(value):
         v = 1.0
     v = max(1.0, min(10.0, v))
     prefs = load_prefs(); prefs["__rock_preview_zoom__"] = v; save_prefs(prefs)
+
+def load_rock_quality_crop_enabled(): return bool(load_prefs().get("__rock_quality_crop__", False))
+def save_rock_quality_crop_enabled(enabled):
+    prefs = load_prefs(); prefs["__rock_quality_crop__"] = bool(enabled); save_prefs(prefs)
 
 def load_history_duration():
     try:
@@ -928,6 +1690,13 @@ def preprocess_gray(img):
 
 OCR_CONFUSIONS = {"8":["6","3","0"],"6":["8"],"3":["8"],"0":["8"],"5":["6","8"]}
 
+# Toggle to disable rock name matching against rock_names.txt
+DISABLE_ROCK_NAME_MATCHING = True
+# Prefer automatic row band detection for contents rows
+AUTO_CONTENT_ROWS = True
+# Disable whole-column OCR collection (kept for fallback if re-enabled)
+ENABLE_COLUMN_WHOLE_OCR = False
+
 def candidate_corrections(val):
     yielded = set()
     if val not in yielded: yielded.add(val); yield val
@@ -939,6 +1708,531 @@ def candidate_corrections(val):
             cand = val[:i] + repl + val[i+1:]
             if cand not in yielded: yielded.add(cand); yield cand
 
+
+PADDLE_CONF_THRESHOLD = 80
+
+def _text_score(text, require_pattern=None):
+    if not text:
+        return 0
+    score = sum(ch.isalnum() for ch in text)
+    if require_pattern:
+        try:
+            if re.search(require_pattern, text or "", re.IGNORECASE):
+                score += 5
+        except Exception:
+            pass
+    return score
+
+def _paddle_wins(tess_text, paddle_text, require_pattern=None):
+    # Only let Paddle override when it clearly looks better
+    if not paddle_text:
+        return False
+    if not tess_text:
+        return True
+    return _text_score(paddle_text, require_pattern) > _text_score(tess_text, require_pattern)
+
+def _adaptive_threshold_hud(img):
+    img = _upscale_for_ocr(img)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                 cv2.THRESH_BINARY_INV, 11, 2)
+
+def _tesseract_text_and_conf(proc, config):
+    try:
+        data = pytesseract.image_to_data(proc, config=config, output_type=_TESS_OUTPUT.DICT)
+        confs = [int(c) for c in data.get('conf', []) if c != '-1']
+        avg_conf = sum(confs) / len(confs) if confs else 0
+        text = " ".join([t for t in data.get('text', []) if t]).strip()
+        return text, avg_conf
+    except Exception as e:
+        _ocr_log(f"[tesseract] data error: {e}")
+        return "", 0
+
+def _extract_numeric_candidates_from_text(text):
+    raw = re.findall(r"\d[\d,]{2,8}", text or "")
+    cleaned = []
+    for val in raw:
+        norm = val.replace(",", "")
+        if norm.isdigit() and 3 <= len(norm) <= 6:
+            cleaned.append(norm)
+    return cleaned
+
+def _collect_texts_scores(obj, texts, scores):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            lk = str(k).lower()
+            if lk in ("text", "rec_text", "rec_texts", "texts"):
+                if isinstance(v, str):
+                    texts.append(v)
+                elif isinstance(v, (list, tuple)):
+                    for item in v:
+                        if isinstance(item, str):
+                            texts.append(item)
+            elif lk in ("score", "rec_score", "text_rec_score", "rec_scores", "scores"):
+                try:
+                    scores.append(float(v))
+                except Exception:
+                    pass
+            elif lk == "res":
+                _collect_texts_scores(v, texts, scores)
+            else:
+                _collect_texts_scores(v, texts, scores)
+    elif isinstance(obj, tuple):
+        # Common pattern: (text, score)
+        if len(obj) == 2 and isinstance(obj[0], str):
+            texts.append(obj[0])
+            try:
+                scores.append(float(obj[1]))
+            except Exception:
+                pass
+        else:
+            for item in obj:
+                _collect_texts_scores(item, texts, scores)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_texts_scores(item, texts, scores)
+
+def _paddle_ocr_result(img):
+    if PADDLE_ENGINE is None:
+        return None
+    try:
+        # Ensure 3-channel BGR input for Paddle
+        if img is not None:
+            if len(img.shape) == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif len(img.shape) == 3 and img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            if len(img.shape) != 3 or img.shape[2] != 3:
+                _ocr_log("[paddle] skip: invalid image shape")
+                return None
+            h, w = img.shape[:2]
+            if h < 2 or w < 2:
+                _ocr_log("[paddle] skip: tiny image")
+                return None
+            if img.dtype != np.uint8:
+                img = img.astype(np.uint8)
+            img = np.ascontiguousarray(img)
+            # Hard cutoff if image exceeds Paddle max_side_limit (default 4000)
+            max_side = 4000
+            max_dim = max(h, w)
+            if max_dim > max_side:
+                _ocr_log(f"[paddle] skip: image too large ({w}x{h})")
+                return None
+        if PADDLE_USE_PREDICT:
+            return PADDLE_ENGINE.predict(img)
+        # Prefer classic OCR call path with tuned inference parameters for faint HUD text
+        try:
+            return PADDLE_ENGINE.ocr(
+                img,
+                det=True,
+                rec=True,
+                cls=False,
+                det_db_thresh=0.2,
+                det_db_box_thresh=0.3,
+                det_db_unclip_ratio=2.0,
+            )
+        except Exception:
+            # Aggressive retry for very faint/glowy text
+            try:
+                return PADDLE_ENGINE.ocr(
+                    img,
+                    det=True,
+                    rec=True,
+                    cls=False,
+                    det_db_thresh=0.1,
+                    det_db_box_thresh=0.2,
+                    det_db_unclip_ratio=2.5,
+                )
+            except Exception:
+                try:
+                    return PADDLE_ENGINE.ocr(img, cls=False)
+                except Exception:
+                    try:
+                        return PADDLE_ENGINE.ocr(img)
+                    except Exception as e2:
+                        try:
+                            return PADDLE_ENGINE.predict(img)
+                        except Exception as e3:
+                            _ocr_log(f"[paddle] ocr error: {e3}")
+                            _ocr_log(f"[paddle] ocr fallback errors: {e2}")
+                            return None
+    except Exception as e1:
+        try:
+            _ocr_log(f"[paddle] input shape={getattr(img,'shape',None)} dtype={getattr(img,'dtype',None)}")
+        except Exception:
+            pass
+        _ocr_log(f"[paddle] ocr error: {e1}")
+        return None
+
+_PADDLE_RESULT_LOGGED = False
+_PADDLE_DUMP_TS = {}
+
+def _paddle_variants(img):
+    def _ensure_bgr(v):
+        try:
+            if v is None:
+                return v
+            if len(v.shape) == 2:
+                return cv2.cvtColor(v, cv2.COLOR_GRAY2BGR)
+            if len(v.shape) == 3 and v.shape[2] == 4:
+                return cv2.cvtColor(v, cv2.COLOR_BGRA2BGR)
+        except Exception:
+            pass
+        return v
+
+    variants = [("raw", _ensure_bgr(img))]
+    try:
+        up = _upscale_for_ocr(img)
+        if up is not None:
+            variants.append(("upscaled", _ensure_bgr(up)))
+        up2 = _upscale_for_paddle(img)
+        if up2 is not None:
+            variants.append(("upscaled2", _ensure_bgr(up2)))
+    except Exception:
+        pass
+    try:
+        rgb = cv2.cvtColor(_ensure_bgr(img), cv2.COLOR_BGR2RGB)
+        variants.append(("rgb", rgb))
+    except Exception:
+        pass
+    try:
+        if "up" in locals():
+            rgb_up = cv2.cvtColor(_ensure_bgr(up), cv2.COLOR_BGR2RGB)
+            variants.append(("rgb_up", rgb_up))
+    except Exception:
+        pass
+    try:
+        gray = cv2.cvtColor(_ensure_bgr(img), cv2.COLOR_BGR2GRAY)
+        gray3 = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        variants.append(("gray", gray3))
+    except Exception:
+        pass
+    # De-dup by shape + first pixel hash
+    seen = set()
+    unique = []
+    for tag, v in variants:
+        try:
+            key = (tag, v.shape, int(v[0,0,0]) if v.ndim == 3 else int(v[0,0]))
+        except Exception:
+            key = tag
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((tag, v))
+    return unique
+
+def _dump_paddle_variants(label, variants):
+    try:
+        now = time.time()
+        last = _PADDLE_DUMP_TS.get(label, 0)
+        if now - last < 8:
+            return
+        _PADDLE_DUMP_TS[label] = now
+        out_dir = _BASE_DIR / "paddle_debug"
+        out_dir.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        for tag, img in variants:
+            try:
+                path = out_dir / f"{label}_{tag}_{stamp}.png"
+                cv2.imwrite(str(path), img)
+            except Exception:
+                pass
+        _ocr_log(f"[paddle] debug dump saved: {out_dir}")
+    except Exception:
+        pass
+
+def _extract_from_ocrresult(res):
+    texts = []
+    scores = []
+    # Try common PaddleX OCRResult attributes directly
+    for name in ("text", "rec_text", "text_rec", "rec", "pred", "prediction", "predictions"):
+        try:
+            val = getattr(res, name)
+            if callable(val):
+                val = val()
+            if isinstance(val, str):
+                texts.append(val)
+            elif isinstance(val, (list, tuple)):
+                for v in val:
+                    if isinstance(v, str):
+                        texts.append(v)
+        except Exception:
+            pass
+    for name in ("score", "rec_score", "text_rec_score", "prob", "probability", "probs", "score_list"):
+        try:
+            val = getattr(res, name)
+            if callable(val):
+                val = val()
+            if isinstance(val, (int, float)):
+                scores.append(float(val))
+            elif isinstance(val, (list, tuple)):
+                for v in val:
+                    try:
+                        scores.append(float(v))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    for name in ("text", "rec_text", "texts", "rec_texts"):
+        try:
+            val = getattr(res, name)
+            if callable(val):
+                val = val()
+            if isinstance(val, str):
+                texts.append(val)
+            elif isinstance(val, list):
+                texts.extend([v for v in val if isinstance(v, str)])
+        except Exception:
+            pass
+    for name in ("score", "rec_score", "scores", "rec_scores"):
+        try:
+            val = getattr(res, name)
+            if callable(val):
+                val = val()
+            if isinstance(val, (int, float)):
+                scores.append(float(val))
+            elif isinstance(val, list):
+                for v in val:
+                    try:
+                        scores.append(float(v))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    return texts, scores
+
+def _paddle_extract_text_and_conf(img, label=None):
+    last_result = None
+    last_text = ""
+    last_conf = 0.0
+    last_tag = None
+    best_text = ""
+    best_conf = 0.0
+    best_tag = None
+    expected = _sample_expected_for_label(label)
+    variants = _paddle_variants(img)
+    for tag, variant in variants:
+        result = _paddle_ocr_result(variant)
+        last_result = result
+        if not result:
+            continue
+        # If result is an iterable (e.g., generator), materialize it
+        if not isinstance(result, (list, tuple, dict, str)) and hasattr(result, "__iter__"):
+            try:
+                result = list(result)
+            except Exception:
+                pass
+        # PaddleOCR 2.x style: list of lines
+        if isinstance(result, list) and result and isinstance(result[0], list):
+            try:
+                best = max(result[0], key=lambda x: x[1][1])
+                text = best[1][0]
+                conf = float(best[1][1]) * 100.0
+                if label:
+                    score = _score_text_against_sample(text, expected)
+                    _ocr_log(f"[paddle] {label} variant={tag} text='{text[:48]}' conf={conf:.1f} match_score={score:.2f}")
+                else:
+                    _ocr_log(f"[paddle] variant={tag} text='{text[:48]}' conf={conf:.1f}")
+                last_text, last_conf, last_tag = text, conf, tag
+                if expected:
+                    score = _score_text_against_sample(text, expected)
+                    if score > _score_text_against_sample(best_text, expected):
+                        best_text, best_conf, best_tag = text, conf, tag
+            except Exception:
+                pass
+        # PaddleOCR 3.x style: list of Result objects / dicts
+        texts = []
+        scores = []
+        if isinstance(result, list):
+            for res in result:
+                j = None
+                try:
+                    if hasattr(res, "json"):
+                        j = res.json() if callable(res.json) else res.json
+                    elif hasattr(res, "to_dict"):
+                        j = res.to_dict()
+                except Exception:
+                    j = None
+                if j is None:
+                    extra_texts, extra_scores = _extract_from_ocrresult(res)
+                    texts.extend(extra_texts)
+                    scores.extend(extra_scores)
+                if j is None and isinstance(res, dict):
+                    j = res
+                if j is not None:
+                    _collect_texts_scores(j, texts, scores)
+        if texts:
+            text = " ".join([t for t in texts if t]).strip()
+            conf = max(scores) if scores else 0
+            if conf <= 1:
+                conf *= 100.0
+            if label:
+                score = _score_text_against_sample(text, expected)
+                _ocr_log(f"[paddle] {label} variant={tag} text='{text[:48]}' conf={conf:.1f} match_score={score:.2f}")
+            else:
+                _ocr_log(f"[paddle] variant={tag} text='{text[:48]}' conf={conf:.1f}")
+            last_text, last_conf, last_tag = text, conf, tag
+            if expected:
+                score = _score_text_against_sample(text, expected)
+                if score > _score_text_against_sample(best_text, expected):
+                    best_text, best_conf, best_tag = text, conf, tag
+        if label:
+            _ocr_log(f"[paddle] {label} variant={tag} no_text parsed")
+        else:
+            _ocr_log(f"[paddle] variant={tag} no_text parsed")
+    if last_text:
+        if label and expected and best_text:
+            score = _score_text_against_sample(best_text, expected)
+            _ocr_log(f"[paddle] {label} chosen variant={best_tag} match_score={score:.2f} expected='{expected[:24]}' text='{best_text[:48]}'")
+            return best_text, best_conf
+        if label:
+            score = _score_text_against_sample(last_text, expected)
+            _ocr_log(f"[paddle] {label} chosen variant={last_tag} match_score={score:.2f} expected='{expected[:24]}' text='{last_text[:48]}'")
+        else:
+            _ocr_log(f"[paddle] chosen variant={last_tag} text='{last_text[:48]}' conf={last_conf:.1f}")
+        return last_text, last_conf
+    if label:
+        _ocr_log(f"[paddle] {label} empty result")
+    else:
+        _ocr_log("[paddle] empty result")
+    _dump_paddle_variants(label or "paddle", variants)
+    # Debug: log result shape once if we couldn't parse
+    result = last_result
+    if not result:
+        return "", 0
+    # If result is an iterable (e.g., generator), materialize it
+    if not isinstance(result, (list, tuple, dict, str)) and hasattr(result, "__iter__"):
+        try:
+            result = list(result)
+        except Exception:
+            pass
+    global _PADDLE_RESULT_LOGGED
+    if not _PADDLE_RESULT_LOGGED:
+        try:
+            _ocr_log(f"[paddle] unparsed result type={type(result)} len={len(result) if hasattr(result,'__len__') else 'n/a'}")
+            if isinstance(result, list) and result:
+                _ocr_log(f"[paddle] first item type={type(result[0])}")
+                # Log any attribute names containing text/score once
+                attrs = [a for a in dir(result[0]) if "text" in a.lower() or "score" in a.lower()]
+                if attrs:
+                    _ocr_log(f"[paddle] OCRResult attrs: {', '.join(attrs[:10])}")
+                # Try to dump a shallow dict/json if available
+                try:
+                    r0 = result[0]
+                    if hasattr(r0, "to_dict"):
+                        _ocr_log(f"[paddle] OCRResult to_dict keys: {list(r0.to_dict().keys())[:10]}")
+                    elif hasattr(r0, "json"):
+                        j = r0.json() if callable(r0.json) else r0.json
+                        if isinstance(j, dict):
+                            _ocr_log(f"[paddle] OCRResult json keys: {list(j.keys())[:10]}")
+                            if "res" in j:
+                                res_obj = j.get("res")
+                                if isinstance(res_obj, dict):
+                                    _ocr_log(f"[paddle] OCRResult res keys: {list(res_obj.keys())[:10]}")
+                                    for k in ("text", "rec_text", "texts", "rec_texts"):
+                                        if k in res_obj:
+                                            _ocr_log(f"[paddle] OCRResult res.{k} sample: {str(res_obj.get(k))[:80]}")
+                                elif isinstance(res_obj, list) and res_obj:
+                                    _ocr_log(f"[paddle] OCRResult res[0] type: {type(res_obj[0])}")
+                                    if isinstance(res_obj[0], dict):
+                                        _ocr_log(f"[paddle] OCRResult res[0] keys: {list(res_obj[0].keys())[:10]}")
+                except Exception:
+                    pass
+            _PADDLE_RESULT_LOGGED = True
+        except Exception:
+            pass
+    return "", 0
+
+_purge_paddle_debug()
+_ensure_sample_template()
+SAMPLE_TEMPLATE = _load_sample_template()
+_init_paddleocr()
+_paddle_self_test()
+
+def extract_mining_data(crop_img):
+    global LAST_OCR_ENGINE, LAST_OCR_CONF
+    text = ""
+    try:
+        processed = _adaptive_threshold_hud(crop_img)
+        text, avg_conf = _tesseract_text_and_conf(processed, HUD_TESS_CONFIG)
+        LAST_OCR_ENGINE = "tesseract"
+        LAST_OCR_CONF = avg_conf
+        if avg_conf >= PADDLE_CONF_THRESHOLD and text:
+            return text, avg_conf, "tesseract"
+    except Exception as e:
+        _ocr_log(f"[hybrid] tesseract stage error: {e}")
+
+    if PADDLE_ENGINE is None:
+        return text, 0, "tesseract"
+    try:
+        _ocr_log("[paddle] fallback: hud")
+        paddle_text, paddle_conf = _paddle_extract_text_and_conf(crop_img, label="hud")
+        if _paddle_wins(text, paddle_text, None):
+            LAST_OCR_ENGINE = "paddle"
+            LAST_OCR_CONF = paddle_conf
+            return paddle_text, paddle_conf, "paddle"
+    except Exception as e:
+        _ocr_log(f"[paddle] ocr error: {e}")
+    return text, 0, LAST_OCR_ENGINE
+
+def _hybrid_ocr_text(raw_img, processed_img, tess_config):
+    """
+    Hybrid OCR for rock panels: Tesseract with confidence gate, PaddleOCR fallback.
+    """
+    global LAST_OCR_ENGINE, LAST_OCR_CONF
+    text = ""
+    try:
+        text, avg_conf = _tesseract_text_and_conf(processed_img, tess_config)
+        LAST_OCR_ENGINE = "tesseract"
+        LAST_OCR_CONF = avg_conf
+        if avg_conf >= PADDLE_CONF_THRESHOLD and text:
+            return text
+    except Exception as e:
+        _ocr_log(f"[hybrid] tesseract stage error: {e}")
+
+    if PADDLE_ENGINE is None:
+        return text
+    try:
+        _ocr_log("[paddle] fallback: rock")
+        paddle_text, paddle_conf = _paddle_extract_text_and_conf(raw_img, label="rock")
+        if _paddle_wins(text, paddle_text, None):
+            LAST_OCR_ENGINE = "paddle"
+            LAST_OCR_CONF = paddle_conf
+            return paddle_text
+    except Exception as e:
+        _ocr_log(f"[paddle] ocr error: {e}")
+    return text
+
+def _hybrid_ocr_text_with_engine(raw_img, processed_img, tess_config, min_conf=None, require_pattern=None, label=None):
+    """
+    Returns (text, engine) where engine is 'tesseract' or 'paddle'.
+    """
+    text = ""
+    try:
+        text, avg_conf = _tesseract_text_and_conf(processed_img, tess_config)
+        if label:
+            _ocr_log(f"[tess] {label} conf={avg_conf:.1f}")
+        threshold = PADDLE_CONF_THRESHOLD if min_conf is None else min_conf
+        ok = bool(text) and avg_conf >= threshold
+        if ok and require_pattern:
+            try:
+                ok = re.search(require_pattern, text or "", re.IGNORECASE) is not None
+            except Exception:
+                ok = False
+        if ok:
+            return text, "tesseract"
+    except Exception as e:
+        _ocr_log(f"[hybrid] tesseract stage error: {e}")
+    if PADDLE_ENGINE is None:
+        return text, "tesseract"
+    try:
+        _ocr_log("[paddle] fallback: rock")
+        paddle_text, _ = _paddle_extract_text_and_conf(raw_img, label=label or "rock")
+        if _paddle_wins(text, paddle_text, require_pattern):
+            return paddle_text, "paddle"
+    except Exception as e:
+        _ocr_log(f"[paddle] ocr error: {e}")
+    return text, "tesseract"
 
 def _run_tesseract(proc, config):
     """
@@ -972,8 +2266,10 @@ def _run_tesseract(proc, config):
 #  - Los errores de Tesseract se registran en ocr_debug.log en lugar de
 #    silenciarse con "except: pass".
 # ---------------------------------------------------------------------------
-def _read_number_internal(img, lookup, active_modes):
-    img = crop_to_number(img)
+def _read_number_legacy(img, lookup, active_modes):
+    global LAST_OCR_ENGINE, LAST_OCR_CONF
+    LAST_OCR_ENGINE = "tesseract"
+    LAST_OCR_CONF = 0.0
     processed_versions = [
         preprocess_bright(img),
         preprocess_adaptive(img),
@@ -1013,6 +2309,34 @@ def _read_number_internal(img, lookup, active_modes):
     return None, raw_candidates, validated
 
 
+def _read_number_internal(img, lookup, active_modes):
+    img = crop_to_number(img)
+    text, _, _ = extract_mining_data(img)
+    raw_candidates = _extract_numeric_candidates_from_text(text)
+
+    if raw_candidates:
+        validated = []
+        numeric_fallback = []
+        for raw in raw_candidates:
+            for cand in candidate_corrections(raw):
+                if cand.isdigit():
+                    numeric_fallback.append(str(int(cand)))
+                if cand in lookup and allowed_by_modes(int(cand), lookup, active_modes):
+                    validated.append(str(int(cand)))
+
+        if validated:
+            counts = {}
+            for cand in validated:
+                counts[cand] = counts.get(cand, 0) + 1
+            return max(counts, key=counts.get), raw_candidates, validated
+
+        _ocr_log(f"[read_number] discarded unvalidated candidates: {raw_candidates}")
+        return None, raw_candidates, validated
+
+    # Fallback to legacy multi-pass if hybrid produced no numeric candidates.
+    return _read_number_legacy(img, lookup, active_modes)
+
+
 def read_number(img, lookup, active_modes):
     value, _, _ = _read_number_internal(img, lookup, active_modes)
     return value
@@ -1031,6 +2355,32 @@ def _parse_stat_value(line, key):
     if not m:
         return None
     return m.group(1).strip()
+
+def _extract_stat_from_text(full_text, key):
+    """
+    Heuristic parse for MASS/RES/INST from raw OCR text.
+    """
+    if not full_text:
+        return None
+    upper = full_text.upper()
+    if key == "MASS":
+        m = re.search(r"(?:MASS|MST|MAS)[^0-9]{0,6}([0-9]{1,6}(?:[.,][0-9]{1,3})?)", upper)
+        if m:
+            raw = m.group(1)
+            if "." in raw or "," in raw:
+                compact = raw.replace(".", "").replace(",", "")
+                if compact.isdigit() and 3 <= len(compact) <= 6:
+                    return compact
+            return raw
+    if key == "RES":
+        m = re.search(r"RES[^0-9]{0,4}([0-9]+(?:[.,][0-9]+)?)\\s*%?", upper)
+        if m:
+            return _normalize_num(m.group(1)) + "%"
+    if key == "INST":
+        m = re.search(r"INS(?:T)?[^0-9]{0,6}([0-9]+(?:[.,][0-9]+)?)", upper)
+        if m:
+            return _normalize_num(m.group(1))
+    return None
 
 def _normalize_num(s):
     return s.replace(",", ".").strip()
@@ -1055,6 +2405,87 @@ def _clean_quality_token(s):
         if len(tok) >= 3:
             return tok
     return m[-1]
+
+def _normalize_comp_value(text):
+    if not text:
+        return None
+    u = text.upper()
+    # Normalize common OCR confusions
+    u = (u.replace("O", "0")
+           .replace("I", "1")
+           .replace("L", "1")
+           .replace("B", "8")
+           .replace("Z", "2")
+           .replace("A", "4"))
+    # Targeted fixes around SCU
+    u = u.replace("SSCU", "48SCU").replace("S8CU", "48SCU").replace("SBCU", "48SCU")
+    u = re.sub(r"S[ETJ]U", "SCU", u)
+    u = u.replace("SCU", " SCU")
+    # Find numeric token before SCU
+    m = re.search(r"([0-9][0-9.,]{0,4})\s*SCU", u)
+    if not m:
+        return None
+    raw = m.group(1).replace(",", ".")
+    # If looks like 148/146, interpret as 1.48/1.46
+    if raw.isdigit() and len(raw) == 3 and raw.startswith("1"):
+        raw = f"{raw[0]}.{raw[1:]}"
+    return f"{raw} SCU"
+
+def _normalize_percent_token(tok):
+    if not tok:
+        return None
+    u = tok.upper()
+    u = (u.replace("O", "0")
+           .replace("I", "1")
+           .replace("L", "1")
+           .replace("Z", "2")
+           .replace("S", "5")
+           .replace("B", "8")
+           .replace("G", "6")
+           .replace("A", "4")
+           .replace("J", "3"))
+    digits = re.sub(r"[^0-9]", "", u)
+    if not digits:
+        return None
+    if len(digits) >= 3:
+        # Interpret 3246 -> 32.46, 324 -> 32.4
+        pct = digits[:-2] + "." + digits[-2:]
+    else:
+        pct = digits
+    return pct
+
+def _extract_percent_tokens(text):
+    if not text:
+        return []
+    tokens = []
+    u = text.upper()
+    u = (u.replace("O", "0")
+           .replace("I", "1")
+           .replace("L", "1")
+           .replace("Z", "2")
+           .replace("S", "5")
+           .replace("B", "8")
+           .replace("G", "6")
+           .replace("A", "4")
+           .replace("J", "3"))
+    u = u.replace("-", "")
+    # Prefer numeric tokens directly before %
+    for m in re.findall(r"(\\d{1,4})\\s*%", u):
+        digits = m
+        if len(digits) == 4:
+            pct = digits[:2] + "." + digits[2:]
+        elif len(digits) == 3:
+            pct = digits[0] + "." + digits[1:]
+        else:
+            pct = digits
+        tokens.append(pct)
+    # Fallback to looser tokens
+    if not tokens:
+        for m in re.findall(r"([A-Z0-9.,-]{1,6})\\s*%", text.upper()):
+            pct = _normalize_percent_token(m.replace("-", "."))
+            if pct:
+                tokens.append(pct)
+    return tokens
 
 def _rock_preprocess(img, mode):
     if mode == "bright":
@@ -1093,7 +2524,13 @@ def _ocr_rock_name(img, ocr_mode="gray"):
         proc = _rock_preprocess(img, ocr_mode)
         if len(proc.shape) == 3:
             proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
-        text = pytesseract.image_to_string(proc, config=ROCK_NAME_TESS_CONFIG).strip()
+        text, engine = _hybrid_ocr_text_with_engine(
+            img, proc, ROCK_NAME_TESS_CONFIG,
+            min_conf=60, require_pattern=r"[A-Z]", label="name"
+        )
+        text = (text or "").strip()
+        if text:
+            _ocr_log(f"[rock_field] name='{text[:32]}' engine={engine}")
         lines = _clean_lines(text)
         return lines[0] if lines else ""
     except Exception as e:
@@ -1105,25 +2542,178 @@ def _ocr_rock_numeric(img, ocr_mode="gray"):
         proc = _rock_preprocess(img, ocr_mode)
         if len(proc.shape) == 3:
             proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
-        text = pytesseract.image_to_string(proc, config=ROCK_NUM_TESS_CONFIG).strip()
+        text, engine = _hybrid_ocr_text_with_engine(
+            img, proc, ROCK_NUM_TESS_CONFIG,
+            min_conf=60, require_pattern=r"\\d", label="numeric"
+        )
+        text = (text or "").strip()
+        if text:
+            _ocr_log(f"[rock_field] numeric engine={engine}")
         return text
     except Exception as e:
         _ocr_log(f"[rock] numeric ocr exception: {e}")
         return ""
 
-def _ocr_rock_quality(img, ocr_mode="gray", psm_line=False):
+def _ocr_rock_numeric_with_engine(img, ocr_mode="gray"):
     try:
         proc = _rock_preprocess(img, ocr_mode)
         if len(proc.shape) == 3:
             proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
-        cfg = ROCK_QUALITY_TESS_CONFIG_LINE if psm_line else ROCK_QUALITY_TESS_CONFIG
-        text = pytesseract.image_to_string(proc, config=cfg).strip()
-        if not text:
-            text = pytesseract.image_to_string(proc, config=ROCK_QUALITY_TESS_CONFIG_SPARSE).strip()
-        return text
+        text, engine = _hybrid_ocr_text_with_engine(
+            img, proc, ROCK_NUM_TESS_CONFIG,
+            min_conf=60, require_pattern=r"\\d", label="numeric"
+        )
+        return (text or "").strip(), engine
+    except Exception as e:
+        _ocr_log(f"[rock] numeric ocr exception: {e}")
+        return "", "tesseract"
+
+def _ocr_rock_quality(img, ocr_mode="gray", psm_line=False):
+    try:
+        # Digits-focused OCR: try multiple preprocess passes and keep the one with most digits
+        cfg = ROCK_QUALITY_TESS_CONFIG_LINE
+        gate_proc = _rock_preprocess(img, ocr_mode)
+        if len(gate_proc.shape) == 3:
+            gate_proc = cv2.cvtColor(gate_proc, cv2.COLOR_BGR2GRAY)
+        gate_text, gate_engine = _hybrid_ocr_text_with_engine(
+            img, gate_proc, cfg,
+            min_conf=60, require_pattern=r"\\d", label="quality"
+        )
+        if gate_text and sum(ch.isdigit() for ch in gate_text) >= 2:
+            _ocr_log(f"[rock_field] quality engine={gate_engine}")
+            return gate_text.strip()
+        candidates = []
+        proc = _rock_preprocess(img, ocr_mode)
+        if len(proc.shape) == 3:
+            proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        candidates.append(pytesseract.image_to_string(proc, config=cfg))
+
+        proc2 = preprocess_support_color(img)
+        if len(proc2.shape) == 3:
+            proc2 = cv2.cvtColor(proc2, cv2.COLOR_BGR2GRAY)
+        candidates.append(pytesseract.image_to_string(proc2, config=cfg))
+
+        proc3 = _upscale_for_ocr(img)
+        gray = cv2.cvtColor(proc3, cv2.COLOR_BGR2GRAY)
+        thr = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                    cv2.THRESH_BINARY, 31, -2)
+        inv = cv2.bitwise_not(thr)
+        candidates.append(pytesseract.image_to_string(inv, config=cfg))
+
+        def _digit_score(s): return sum(ch.isdigit() for ch in s)
+        best = max(candidates, key=_digit_score) if candidates else ""
+        return best.strip()
     except Exception as e:
         _ocr_log(f"[rock] quality ocr exception: {e}")
         return ""
+
+def _extract_quality_from_table_boxes(img, ocr_mode="gray"):
+    try:
+        return []
+        # Sort by y then x
+        items.sort(key=lambda t: (t["y"], t["x"]))
+        rows = []
+        for it in items:
+            y_mid = it["y"] + it["h"] / 2.0
+            placed = False
+            for row in rows:
+                if abs(y_mid - row["y_mid"]) <= row["h"] * 0.6:
+                    row["items"].append(it)
+                    row["y_mid"] = (row["y_mid"] + y_mid) / 2.0
+                    row["h"] = max(row["h"], it["h"])
+                    placed = True
+                    break
+            if not placed:
+                rows.append({"y_mid": y_mid, "h": it["h"], "items": [it], "engine": "tesseract"})
+        qualities = []
+        for row in rows:
+            row_items = sorted(row["items"], key=lambda t: t["x"])
+            token = "".join([t["text"] for t in row_items])
+            token = _clean_quality_token(token)
+            if token:
+                qualities.append(token)
+        return qualities
+    except Exception as e:
+        _ocr_log(f"[rock] quality box exception: {e}")
+        return []
+
+def _segment_table_rows_by_projection(table_img, ocr_mode="gray"):
+    try:
+        proc = _rock_preprocess(table_img, ocr_mode)
+        if len(proc.shape) == 3:
+            proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+        _, bw = cv2.threshold(proc, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Treat dark pixels as ink
+        ink = (bw == 0).astype(np.uint8)
+        row_sums = ink.sum(axis=1)
+        # Smooth to reduce noise (slightly wider window for HUD text bands)
+        if row_sums.size >= 7:
+            row_sums = np.convolve(row_sums, np.ones(7)/7.0, mode="same")
+        thresh = max(1, int(0.02 * ink.shape[1]))
+        in_row = row_sums > thresh
+        segments = []
+        start = None
+        for i, val in enumerate(in_row):
+            if val and start is None:
+                start = i
+            if not val and start is not None:
+                if i - start >= max(4, int(0.03 * ink.shape[0])):
+                    segments.append((start, i))
+                start = None
+        if start is not None and (len(in_row) - start) >= max(4, int(0.03 * ink.shape[0])):
+            segments.append((start, len(in_row)))
+        # Merge very small gaps
+        merged = []
+        for seg in segments:
+            if not merged:
+                merged.append(seg)
+                continue
+            prev = merged[-1]
+            if seg[0] - prev[1] <= max(3, int(0.02 * ink.shape[0])):
+                merged[-1] = (prev[0], seg[1])
+            else:
+                merged.append(seg)
+        # Keep most prominent rows by ink density if too many
+        if len(merged) > 0:
+            strengths = []
+            for (y0, y1) in merged:
+                strengths.append((row_sums[y0:y1].sum(), (y0, y1)))
+            strengths.sort(reverse=True, key=lambda x: x[0])
+            # Heuristic: limit to top 10 rows to avoid runaway
+            keep = [seg for _, seg in strengths[:10]]
+            keep.sort()
+            return keep
+        # Fallback: contour-based row bands (better for thin HUD text)
+        try:
+            h, w = bw.shape[:2]
+            # Dilate horizontally to merge characters into lines
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, int(w * 0.15)), 1))
+            band = cv2.dilate(255 - bw, kernel, iterations=1)
+            contours, _ = cv2.findContours(band, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            bands = []
+            for c in contours:
+                x, y, ww, hh = cv2.boundingRect(c)
+                if ww < int(w * 0.35):
+                    continue
+                if hh < max(4, int(h * 0.03)):
+                    continue
+                bands.append((y, y + hh))
+            bands.sort()
+            # Merge overlapping bands
+            merged2 = []
+            for seg in bands:
+                if not merged2:
+                    merged2.append(seg); continue
+                prev = merged2[-1]
+                if seg[0] <= prev[1] + max(2, int(h * 0.01)):
+                    merged2[-1] = (prev[0], max(prev[1], seg[1]))
+                else:
+                    merged2.append(seg)
+            return merged2
+        except Exception:
+            return []
+    except Exception:
+        return []
 
 def parse_rock_details(img, ocr_mode="gray"):
     """
@@ -1136,7 +2726,13 @@ def parse_rock_details(img, ocr_mode="gray"):
             proc_for_ocr = proc
         else:
             proc_for_ocr = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
-        text = pytesseract.image_to_string(proc_for_ocr, config=ROCK_TESS_CONFIG).strip()
+        text, panel_engine = _hybrid_ocr_text_with_engine(
+            img, proc_for_ocr, ROCK_TESS_CONFIG,
+            min_conf=65, require_pattern=r"[A-Z0-9]", label="panel"
+        )
+        text = (text or "").strip()
+        if text:
+            _ocr_log(f"[rock_field] panel engine={panel_engine}")
         lines = _clean_lines(text)
         if not lines:
             return None, text
@@ -1146,9 +2742,16 @@ def parse_rock_details(img, ocr_mode="gray"):
         try:
             h, w = img.shape[:2]
             boxes = rock_boxes_for_shape(h, w)
+            if not boxes:
+                _ocr_log("[rock] missing calibration boxes; aborting OCR")
+                return None, text
             x1, y1, x2, y2 = boxes.get("name", (0, 0, w, h))
             name_crop = img[y1:y2, x1:x2]
-            name = _ocr_rock_name(name_crop, ocr_mode)
+            name_cal = _get_calibration_field("name")
+            if name_cal:
+                name = _ocr_with_calibration("name", name_crop, ROCK_NAME_TESS_CONFIG, r"[A-Z]", ocr_mode, name_cal)
+            else:
+                name = _ocr_rock_name(name_crop, ocr_mode)
         except Exception:
             name = None
         if not name:
@@ -1180,29 +2783,71 @@ def parse_rock_details(img, ocr_mode="gray"):
             sx1, sy1, sx2, sy2 = boxes.get("stats", (0, 0, w, h))
             cx1, cy1, cx2, cy2 = boxes.get("comp", (0, 0, w, h))
             tx1, ty1, tx2, ty2 = boxes.get("table", (0, 0, w, h))
-            stats_text = _ocr_rock_numeric(img[sy1:sy2, sx1:sx2], ocr_mode)
-            comp_text = _ocr_rock_numeric(img[cy1:cy2, cx1:cx2], ocr_mode)
+            stats_crop = img[sy1:sy2, sx1:sx2]
+            comp_crop = img[cy1:cy2, cx1:cx2]
+            stats_cal = _get_calibration_field("stats")
+            if stats_cal:
+                stats_text = _ocr_with_calibration("stats", stats_crop, ROCK_NUM_TESS_CONFIG, r"\\d", ocr_mode, stats_cal)
+                stats_engine = stats_cal.get("engine", "tesseract")
+            else:
+                stats_text, stats_engine = _ocr_rock_numeric_with_engine(stats_crop, ocr_mode)
+            comp_cal = _get_calibration_field("comp")
+            if comp_cal:
+                comp_text = _ocr_with_calibration("comp", comp_crop, ROCK_NUM_TESS_CONFIG, r"\\d", ocr_mode, comp_cal)
+                comp_engine = comp_cal.get("engine", "tesseract")
+            else:
+                comp_text, comp_engine = _ocr_rock_numeric_with_engine(comp_crop, ocr_mode)
             table_img = img[ty1:ty2, tx1:tx2]
-            table_text = _ocr_rock_numeric(table_img, ocr_mode)
-            # Quality column: take a right-justified narrow slice
-            qw = max(1, int((tx2 - tx1) * 0.18))
+            table_cal = _get_calibration_field("table")
+            if table_cal:
+                table_text = _ocr_with_calibration("table", table_img, ROCK_NUM_TESS_CONFIG, r"\\d", ocr_mode, table_cal)
+                table_engine = table_cal.get("engine", "tesseract")
+            else:
+                table_text, table_engine = _ocr_rock_numeric_with_engine(table_img, ocr_mode)
+            # Quality column: take a right-justified slice (wider)
+            qw = max(1, int((tx2 - tx1) * 0.35))
             qx1 = max(tx1, tx2 - qw)
-            quality_text = _ocr_rock_quality(img[ty1:ty2, qx1:tx2], ocr_mode)
+            if ENABLE_COLUMN_WHOLE_OCR:
+                if "quality" in boxes:
+                    q1, qy1, q2, qy2 = boxes.get("quality", (qx1, ty1, tx2, ty2))
+                    quality_text = _ocr_rock_quality(img[qy1:qy2, q1:q2], ocr_mode)
+                else:
+                    quality_text = _ocr_rock_quality(img[ty1:ty2, qx1:tx2], ocr_mode)
+                # Percent column for row boundary detection
+                # Widen percent column to capture full % values
+                if "percent" in boxes:
+                    p1, py1, p2, py2 = boxes.get("percent", (tx1, ty1, tx1 + int((tx2 - tx1) * 0.30), ty2))
+                    percent_img = img[py1:py2, p1:p2]
+                else:
+                    pw = max(1, int((tx2 - tx1) * 0.30))
+                    percent_img = img[ty1:ty2, tx1:tx1 + pw]
         except Exception:
-            pass        # Parse stats by row order: MASS, RES, INST
+            pass
+
+        # Parse stats by row order: MASS, RES, INST
         stat_lines = _clean_lines(stats_text)
         stat_nums = []
         for l in stat_lines:
             nums = re.findall(r"\d+(?:[\.,]\d+)?", l)
             stat_nums.append(nums)
 
+        # Heuristic parse from full OCR text first
+        if mass is None:
+            mass = _extract_stat_from_text(text, "MASS")
+        if res is None:
+            res = _extract_stat_from_text(text, "RES")
+        if inst is None:
+            inst = _extract_stat_from_text(text, "INST")
+
         if len(stat_nums) >= 1 and mass is None:
             for n in stat_nums[0]:
                 if n.isdigit() and 3 <= len(n) <= 6:
                     mass = n
                     break
+            # Avoid treating decimals as mass (often INST)
             if mass is None and stat_nums[0]:
-                mass = _normalize_num(stat_nums[0][0])
+                if stat_nums[0][0].isdigit():
+                    mass = _normalize_num(stat_nums[0][0])
 
         if len(stat_nums) >= 2 and res is None:
             if stat_nums[1]:
@@ -1212,36 +2857,53 @@ def parse_rock_details(img, ocr_mode="gray"):
             if stat_nums[2]:
                 inst = _normalize_num(stat_nums[2][0])
 
+        # If only one stat line is present and it looks like a decimal, treat as INST
+        if inst is None and len(stat_nums) >= 1:
+            decs = [n for n in stat_nums[0] if "." in n or "," in n]
+            if decs:
+                inst = _normalize_num(decs[0])
+
         # If RES line has no numbers (often OCRs as just 'S'), treat as 0%
         if res is None and len(stat_nums) >= 2:
             if not stat_nums[1]:
                 res = "0%"
+        # If OCR saw RES but no digits anywhere, default to 0%
+        if res is None and text and "RES" in text.upper():
+            # Only treat as 0% if no digits appear shortly after RES
+            if not re.search(r"RES[^0-9]{0,4}[0-9]", text.upper()):
+                res = "0%"
+        # If RES is still missing but INST is present and stats look single-line, assume 0%
+        if res is None and inst is not None:
+            if "RES" not in (text or "").upper() and "RES" not in (stats_text or "").upper():
+                if len(stat_nums) <= 1:
+                    res = "0%"
+
+        if mass or res or inst:
+            _ocr_log(f"[rock_field] stats mass={mass or '—'} res={res or '—'} inst={inst or '—'}")
 
         # Parse comp from comp_text
         if comp is None and text:
-            m = re.search(r"(\d+(?:[\.,]\d+)?)\s*SCU", text.upper())
-            if m:
-                comp = _normalize_num(m.group(1)) + " SCU"
+            comp = _normalize_comp_value(text)
 
         if comp is None:
             for l in _clean_lines(comp_text):
-                u = l.upper()
-                m = re.search(r"(\d+(?:[\.,]\d+)?)\s*SCU", u)
-                if m:
-                    comp = _normalize_num(m.group(1)) + " SCU"
+                comp = _normalize_comp_value(l)
+                if comp:
                     break
 
         if comp is None and comp_text:
-            nums = re.findall(r"\d+(?:[\.,]\d+)?", comp_text)
-            if nums:
-                comp = _normalize_num(nums[0]) + " SCU"
+            comp = _normalize_comp_value(comp_text)
+
+        if comp:
+            _ocr_log(f"[rock_field] comp={comp}")
 
         quality_lines = []
         if quality_text:
+            # Extract all numeric tokens in order
             for l in _clean_lines(quality_text):
-                tok = _clean_quality_token(l)
-                if tok:
-                    quality_lines.append(tok)
+                toks = re.findall(r"\d{1,4}", _clean_quality_token(l) or l)
+                if toks:
+                    quality_lines.extend(toks)
 
         # If quality crop failed, try per-row right-slice OCR from the table image
         if not quality_lines and 'table_img' in locals():
@@ -1258,41 +2920,243 @@ def parse_rock_details(img, ocr_mode="gray"):
                     tok = _clean_quality_token(qtxt)
                     if tok:
                         quality_lines.append(tok)
+            # If still empty, use box-level OCR grouping
+            if not quality_lines:
+                quality_lines = _extract_quality_from_table_boxes(table_img, ocr_mode)
+        # Row-boundary driven quality OCR (right-justified), using percent column boxes
+        percent_rows = []
+        if ENABLE_COLUMN_WHOLE_OCR and not quality_lines and 'table_img' in locals():
+            try:
+                row_bounds = []
+                if 'percent_img' in locals():
+                    proc = _rock_preprocess(percent_img, ocr_mode)
+                    if len(proc.shape) == 3:
+                        proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+                    data = pytesseract.image_to_data(proc, config=ROCK_NUM_TESS_CONFIG, output_type=_TESS_OUTPUT.DICT)
+                    n = len(data.get("text", []))
+                    boxes = []
+                    for i in range(n):
+                        txt = (data["text"][i] or "").strip()
+                        if not txt:
+                            continue
+                        if "%" not in txt and not any(ch.isdigit() for ch in txt):
+                            continue
+                        y = data["top"][i]; h = data["height"][i]
+                        boxes.append((y, y + h))
+                    boxes.sort()
+                    for y0, y1 in boxes:
+                        placed = False
+                        for j, (a0, a1) in enumerate(row_bounds):
+                            if abs(y0 - a0) <= 6:
+                                row_bounds[j] = (min(a0, y0), max(a1, y1))
+                                placed = True
+                                break
+                        if not placed:
+                            row_bounds.append((y0, y1))
+                if row_bounds:
+                    th, tw = table_img.shape[:2]
+                    slice_w = max(1, int(tw * 0.30))
+                    for y0, y1 in row_bounds:
+                        y0 = max(0, y0 - 2); y1 = min(th, y1 + 2)
+                        row_img = table_img[y0:y1, tw - slice_w:tw]
+                        row_img = _upscale_for_ocr(row_img)
+                        qtxt = _ocr_rock_quality(row_img, ocr_mode, psm_line=True)
+                        tok = _clean_quality_token(qtxt)
+                        if tok:
+                            quality_lines.append(tok)
+                    # Also OCR percent column per row for better % recovery
+                    try:
+                        ph, pw = percent_img.shape[:2]
+                        for y0, y1 in row_bounds:
+                            y0 = max(0, y0 - 2); y1 = min(ph, y1 + 2)
+                            prow = percent_img[y0:y1, 0:pw]
+                            proc = _rock_preprocess(prow, ocr_mode)
+                            if len(proc.shape) == 3:
+                                proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+                            row_text, engine = _hybrid_ocr_text_with_engine(
+                                prow, proc, ROCK_NUM_TESS_CONFIG,
+                                min_conf=60, require_pattern=r"\\d", label="percent_row"
+                            )
+                            pct_tokens = _extract_percent_tokens(row_text)
+                            if pct_tokens:
+                                percent_rows.append((pct_tokens[0], engine))
+                                _ocr_log(f"[rock_field] percent_row engine={engine} text='{row_text[:24]}' pct={pct_tokens[0]}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Row segmentation using calibrated row height or projection gaps
+        seg_rows = []
+        row_segments = []
+        row_height = None
+        sample_row_count = 0
+        if 'boxes' in locals() and "row" in boxes:
+            try:
+                _, ry1, _, ry2 = boxes.get("row")
+                row_height = max(6, int(ry2 - ry1))
+            except Exception:
+                row_height = None
+        if 'table_img' in locals():
+            th, tw = table_img.shape[:2]
+            if AUTO_CONTENT_ROWS:
+                row_segments = _segment_table_rows_by_projection(table_img, ocr_mode)
+            if not row_segments:
+                if sample_row_count:
+                    est_count = max(1, int(sample_row_count))
+                    if row_height is None:
+                        row_height = max(8, int(th / est_count))
+                elif row_height:
+                    est_count = max(1, int((th + row_height - 1) / row_height))
+                else:
+                    est_count = 1
+                    row_height = max(8, int(th / est_count))
+                for i in range(est_count):
+                    y0 = i * row_height
+                    y1 = min(th, (i + 1) * row_height)
+                    if y1 > y0:
+                        row_segments.append((y0, y1))
+            _ocr_log(f"[rock_rows] seg_count={len(row_segments)} row_height={row_height or 'auto'} table_h={th}")
+
+        if row_segments and 'table_img' in locals():
+            th, tw = table_img.shape[:2]
+            # Default column bounds (relative to table)
+            p_left, p_right = 0, max(1, int(tw * 0.30))
+            q_left, q_right = max(0, int(tw * 0.65)), tw
+            if 'boxes' in locals() and 'tx1' in locals():
+                if "percent" in boxes:
+                    p1, py1, p2, py2 = boxes.get("percent", (tx1, ty1, tx1 + int((tx2 - tx1) * 0.30), ty2))
+                    p_left = max(0, p1 - tx1); p_right = min(tw, p2 - tx1)
+                if "quality" in boxes:
+                    q1, qy1, q2, qy2 = boxes.get("quality", (tx1 + int((tx2 - tx1) * 0.65), ty1, tx2, ty2))
+                    q_left = max(0, q1 - tx1); q_right = min(tw, q2 - tx1)
+
+            # Heuristic padding to avoid cutting off row names if percent box is too wide
+            name_pad = max(1, int(tw * 0.06))
+            p_right = min(tw, max(p_right, int(tw * 0.18)))
+            q_left = max(0, min(q_left, int(tw * 0.85)))
+
+            for y0, y1 in row_segments:
+                row_img = table_img[y0:y1, :]
+                pct = ""
+                pct_engine = "tesseract"
+                name_engine = "tesseract"
+                # Percent per-row OCR
+                if 'percent_img' in locals():
+                    prow = percent_img[y0:y1, :]
+                    pproc = _rock_preprocess(prow, ocr_mode)
+                    if len(pproc.shape) == 3:
+                        pproc = cv2.cvtColor(pproc, cv2.COLOR_BGR2GRAY)
+                    row_idx = len(seg_rows) + 1
+                    p_cal = _get_calibration_field(f"percent_row_{row_idx}")
+                    if p_cal:
+                        ptxt = _ocr_with_calibration(f"percent_row_{row_idx}", prow, ROCK_NUM_TESS_CONFIG, r"\\d", ocr_mode, p_cal)
+                        p_eng = p_cal.get("engine", "tesseract")
+                    else:
+                        ptxt, p_eng = _hybrid_ocr_text_with_engine(
+                            prow, pproc, ROCK_NUM_TESS_CONFIG,
+                            min_conf=55, require_pattern=r"\\d", label=f"percent_row_{row_idx}"
+                        )
+                    pct_tokens = _extract_percent_tokens(ptxt)
+                    if pct_tokens:
+                        pct = pct_tokens[0]
+                        pct_engine = p_eng
+                    _ocr_log(f"[rock_col] percent_row engine={p_eng} text='{(ptxt or '')[:28]}' pct={pct}")
+
+                # Name per-row OCR (middle columns)
+                nx1, nx2 = max(0, p_right - name_pad), min(tw, q_left)
+                if nx2 <= nx1:
+                    nx1, nx2 = 0, tw
+                nrow = row_img[:, nx1:nx2]
+                nproc = _rock_preprocess(nrow, ocr_mode)
+                if len(nproc.shape) == 3:
+                    nproc = cv2.cvtColor(nproc, cv2.COLOR_BGR2GRAY)
+                row_idx = len(seg_rows) + 1
+                n_cal = _get_calibration_field(f"row_name_{row_idx}")
+                if n_cal:
+                    ntext = _ocr_with_calibration(f"row_name_{row_idx}", nrow, ROCK_NAME_TESS_CONFIG, r"[A-Z]", ocr_mode, n_cal)
+                    n_eng = n_cal.get("engine", "tesseract")
+                else:
+                    ntext, n_eng = _hybrid_ocr_text_with_engine(
+                        nrow, nproc, ROCK_NAME_TESS_CONFIG,
+                        min_conf=55, require_pattern=r"[A-Z]", label=f"row_name_{row_idx}"
+                    )
+                name_engine = n_eng
+                nlines = _clean_lines(ntext)
+                name_row = nlines[0] if nlines else ""
+                if not DISABLE_ROCK_NAME_MATCHING:
+                    name_row = _fuzzy_match_name(name_row, load_rock_names())
+                _ocr_log(f"[rock_col] name_row engine={n_eng} text='{(ntext or '')[:28]}' name='{name_row[:24]}'")
+
+                # Quality per-row OCR (right columns)
+                qrow = row_img[:, q_left:q_right] if q_right > q_left else row_img[:, int(tw * 0.70):tw]
+                row_idx = len(seg_rows) + 1
+                q_cal = _get_calibration_field(f"quality_row_{row_idx}")
+                if q_cal:
+                    qtxt = _ocr_with_calibration(f"quality_row_{row_idx}", qrow, ROCK_QUALITY_TESS_CONFIG_LINE, r"\\d", ocr_mode, q_cal)
+                else:
+                    qtxt = _ocr_rock_quality(qrow, ocr_mode, psm_line=True)
+                quality = _clean_quality_token(qtxt)
+                _ocr_log(f"[rock_col] quality_row text='{(qtxt or '')[:28]}' quality={quality}")
+
+                if pct or name_row or quality:
+                    row_engine = pct_engine if pct else name_engine
+                    seg_rows.append({"pct": pct, "name": name_row, "quality": quality, "engine": row_engine})
+                    _ocr_log(f"[rock_row] seg pct={pct} name={name_row} quality={quality} pct_engine={pct_engine} name_engine={name_engine}")
 
         rows = []
+        if seg_rows:
+            rows = seg_rows
         row_re = re.compile(r"(\d+(?:[.,]\d+)?)\s*%\s*([A-Z0-9 ()/\-]+?)(?:\s+(\d{1,4}))?\s*$", re.IGNORECASE)
-        if table_text:
-            source_lines = [s.strip() for s in table_text.replace("\n", " ").split("|") if s.strip()]
-        else:
-            source_lines = lines
-        for idx, l in enumerate(source_lines):
-            u = l.upper()
-            if "%" not in u:
-                continue
-            m = row_re.search(u)
-            if not m:
-                continue
-            pct = m.group(1).replace(",", ".")
-            name_row = m.group(2).strip()
-            name_row = _fuzzy_match_name(name_row, load_rock_names())
-            quality = _clean_quality_token(m.group(3) or "")
-            # Prefer 3-4 digit quality from right-column OCR if available
-            if (len(quality) < 3 or not quality.isdigit()) and idx < len(quality_lines):
-                quality = quality_lines[idx]
-            if not quality:
-                # Try trailing digits from the segment itself
-                tail = _clean_quality_token(u)
-                if tail:
-                    quality = tail
-            try:
-                qv = int(quality) if quality else None
-                if qv is not None and (qv < 0 or qv > 1000):
+        if len(rows) < 2:
+            if table_text:
+                source_lines = [s.strip() for s in table_text.replace("\n", " ").split("|") if s.strip()]
+            else:
+                source_lines = lines
+            for idx, l in enumerate(source_lines):
+                u = l.upper()
+                if "%" not in u:
+                    continue
+                m = row_re.search(u)
+                if not m:
+                    continue
+                pct = m.group(1).replace(",", ".")
+                name_row = m.group(2).strip()
+                if not DISABLE_ROCK_NAME_MATCHING:
+                    name_row = _fuzzy_match_name(name_row, load_rock_names())
+                quality = _clean_quality_token(m.group(3) or "")
+                # Prefer 3-4 digit quality from right-column OCR if available
+                if (len(quality) < 3 or not quality.isdigit()) and idx < len(quality_lines):
+                    quality = quality_lines[idx]
+                if not quality:
+                    # Try trailing digits from the segment itself
+                    tail = _clean_quality_token(u)
+                    if tail:
+                        quality = tail
+                try:
+                    qv = int(quality) if quality else None
+                    if qv is not None and (qv < 0 or qv > 1000):
+                        qv = None
+                except Exception:
                     qv = None
-            except Exception:
-                qv = None
-            if qv is not None and len(str(qv)) < 3 and qv != 0:
-                qv = None
-            rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else ""})
+                # Accept any numeric quality (0-1000), even if fewer than 3 digits
+                rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else "", "engine": "tesseract"})
+
+        # Fallback: extract percent/value pairs if table_text is noisy and rows are too few
+        if table_text and len(rows) < 2:
+            pairs = re.findall(r"(\\d+(?:[.,]\\d+)?)\\s*%[^0-9]{0,8}(\\d{1,4})", table_text)
+            if pairs:
+                for i, (pct_raw, qty_raw) in enumerate(pairs):
+                    pct = pct_raw.replace(",", ".")
+                    quality = qty_raw if qty_raw else (quality_lines[i] if i < len(quality_lines) else "")
+                    rows.append({"pct": pct, "name": "", "quality": quality, "engine": "tesseract"})
+            # If still too few rows, at least capture all % tokens
+            if len(rows) < 2:
+                pct_tokens = re.findall(r"(\\d+(?:[.,]\\d+)?)\\s*%", table_text)
+                for i, pct_raw in enumerate(pct_tokens):
+                    pct = pct_raw.replace(",", ".")
+                    quality = quality_lines[i] if i < len(quality_lines) else ""
+                    rows.append({"pct": pct, "name": "", "quality": quality, "engine": "tesseract"})
 
         if not rows and table_text:
             for idx, l in enumerate(lines):
@@ -1303,7 +3167,9 @@ def parse_rock_details(img, ocr_mode="gray"):
                 if not m:
                     continue
                 pct = m.group(1).replace(",", ".")
-                name_row = _fuzzy_match_name(m.group(2).strip(), load_rock_names())
+                name_row = m.group(2).strip()
+                if not DISABLE_ROCK_NAME_MATCHING:
+                    name_row = _fuzzy_match_name(name_row, load_rock_names())
                 quality = (m.group(3) or "").strip()
                 if (len(quality) < 3 or not quality.isdigit()) and idx < len(quality_lines):
                     quality = quality_lines[idx]
@@ -1313,9 +3179,7 @@ def parse_rock_details(img, ocr_mode="gray"):
                         qv = None
                 except Exception:
                     qv = None
-                if qv is not None and len(str(qv)) < 3 and qv != 0:
-                    qv = None
-                rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else ""})
+                rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else "", "engine": "tesseract"})
 
         # Final fallback: parse rows from raw OCR text segments
         if not rows:
@@ -1328,7 +3192,9 @@ def parse_rock_details(img, ocr_mode="gray"):
                 if not m:
                     continue
                 pct = m.group(1).replace(",", ".")
-                name_row = _fuzzy_match_name(m.group(2).strip(), load_rock_names())
+                name_row = m.group(2).strip()
+                if not DISABLE_ROCK_NAME_MATCHING:
+                    name_row = _fuzzy_match_name(name_row, load_rock_names())
                 quality = (m.group(3) or "").strip()
                 if (len(quality) < 3 or not quality.isdigit()) and idx < len(quality_lines):
                     quality = quality_lines[idx]
@@ -1340,14 +3206,63 @@ def parse_rock_details(img, ocr_mode="gray"):
                     qv = None
                 if qv is not None and len(str(qv)) < 3 and qv != 0:
                     qv = None
-                rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else ""})
+                rows.append({"pct": pct, "name": name_row, "quality": str(qv) if qv is not None else "", "engine": "tesseract"})
+
+        # Ultra-loose fallback: grab percent tokens + nearest numeric quality from full text
+        if len(rows) < 2 and text:
+            loose_pairs = re.findall(r"([A-Z0-9.,-]{1,6})\\s*%[^0-9]{0,8}([0-9]{1,4})", text.upper())
+            for i, (ptok, qty) in enumerate(loose_pairs):
+                pct = _normalize_percent_token(ptok)
+                if not pct:
+                    continue
+                quality = qty if qty else (quality_lines[i] if i < len(quality_lines) else "")
+                rows.append({"pct": pct, "name": "", "quality": quality, "engine": "tesseract"})
+            if len(rows) < 2:
+                pct_tokens = _extract_percent_tokens(text)
+                for i, pct in enumerate(pct_tokens):
+                    rows.append({"pct": pct, "name": "", "quality": quality_lines[i] if i < len(quality_lines) else "", "engine": "tesseract"})
+                if pct_tokens:
+                    _ocr_log(f"[rock_field] percent tokens(raw)={pct_tokens}")
+
+        # Percent-column OCR fallback
+        if ENABLE_COLUMN_WHOLE_OCR and len(rows) < 2 and 'percent_img' in locals():
+            try:
+                proc = _rock_preprocess(percent_img, ocr_mode)
+                if len(proc.shape) == 3:
+                    proc = cv2.cvtColor(proc, cv2.COLOR_BGR2GRAY)
+                percent_text, engine = _hybrid_ocr_text_with_engine(
+                    percent_img, proc, ROCK_NUM_TESS_CONFIG,
+                    min_conf=60, require_pattern=r"\\d", label="percent"
+                )
+                pct_tokens = _extract_percent_tokens(percent_text)
+                for i, pct in enumerate(pct_tokens):
+                    rows.append({"pct": pct, "name": "", "quality": quality_lines[i] if i < len(quality_lines) else "", "engine": engine})
+                if pct_tokens:
+                    _ocr_log(f"[rock_field] percent engine={engine} tokens={pct_tokens}")
+            except Exception:
+                pass
+
+        # If we captured per-row percents from the percent column, use them
+        if len(rows) < 2 and percent_rows:
+            for i, (pct, eng) in enumerate(percent_rows):
+                rows.append({"pct": pct, "name": "", "quality": quality_lines[i] if i < len(quality_lines) else "", "engine": eng})
+        # OpenAI contents pass (always attempt when enabled)
+        if 'table_img' in locals():
+            oai_rows = _openai_contents_rows(table_img, table_text)
+            if oai_rows:
+                rows = oai_rows
+                _ocr_log(f"[ai-{load_ai_provider()}] using rows from API")
+        if rows:
+            for i, r in enumerate(rows, 1):
+                _ocr_log(f"[rock_row] idx={i} pct={r.get('pct','')} name={r.get('name','')} quality={r.get('quality','')} engine={r.get('engine','')}")
 
         if not name and not rows and not any([mass, res, inst, comp]):
             return None, text
 
-        name_list = load_rock_names()
         raw_name = name or ""
-        name = _fuzzy_match_name(raw_name, name_list)
+        if not DISABLE_ROCK_NAME_MATCHING:
+            name_list = load_rock_names()
+            name = _fuzzy_match_name(raw_name, name_list)
         data = {
             "name": name or "",
             "raw_name": raw_name,
@@ -1423,15 +3338,86 @@ def _fuzzy_match_name(raw_name, choices):
                 best = (score, c)
     return best[1] if best[0] >= 0.30 else raw
 
+_ROCK_BOX_CACHE = None
+_ROCK_BOX_MTIME = None
+_ROCK_CALIB_CACHE = None
+_ROCK_CALIB_MTIME = None
+
+def _load_rock_boxes_from_config():
+    global _ROCK_BOX_CACHE, _ROCK_BOX_MTIME
+    try:
+        if not ROCK_CONFIG_FILE.exists():
+            return None
+        mtime = ROCK_CONFIG_FILE.stat().st_mtime
+        if _ROCK_BOX_CACHE is not None and _ROCK_BOX_MTIME == mtime:
+            return _ROCK_BOX_CACHE
+        payload = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("boxes"), dict):
+            _ROCK_BOX_CACHE = payload["boxes"]
+            _ROCK_BOX_MTIME = mtime
+            return _ROCK_BOX_CACHE
+    except Exception:
+        return None
+    return None
+
+def _load_rock_calibration_from_config():
+    global _ROCK_CALIB_CACHE, _ROCK_CALIB_MTIME
+    try:
+        if not ROCK_CONFIG_FILE.exists():
+            return None
+        mtime = ROCK_CONFIG_FILE.stat().st_mtime
+        if _ROCK_CALIB_CACHE is not None and _ROCK_CALIB_MTIME == mtime:
+            return _ROCK_CALIB_CACHE
+        payload = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            cal = payload.get("calibration")
+            if isinstance(cal, dict):
+                _ROCK_CALIB_CACHE = cal
+                _ROCK_CALIB_MTIME = mtime
+                return _ROCK_CALIB_CACHE
+    except Exception:
+        return None
+    return None
+
+def _get_calibration_field(field_key):
+    cal = _load_rock_calibration_from_config()
+    if not cal:
+        return None
+    return cal.get(field_key)
+def _rock_calibration_ready():
+    try:
+        if not ROCK_CONFIG_FILE.exists():
+            return False
+        payload = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
+        boxes = payload.get("boxes")
+        if not isinstance(boxes, dict):
+            return False
+        required = {"name", "stats", "comp", "table", "row", "percent", "quality"}
+        if not required.issubset(set(boxes.keys())):
+            return False
+        return True
+    except Exception:
+        return False
+
 def rock_boxes_for_shape(h, w):
-    # Rough zones based on layout of the rock panel
-    return {
-        "header": (int(0.02*w), int(0.02*h), int(0.96*w), int(0.10*h)),
-        "name":   (int(0.02*w), int(0.10*h), int(0.96*w), int(0.16*h)),
-        "stats":  (int(0.02*w), int(0.16*h), int(0.96*w), int(0.41*h)),
-        "comp":   (int(0.02*w), int(0.42*h), int(0.96*w), int(0.50*h)),
-        "table":  (int(0.02*w), int(0.54*h), int(0.96*w), int(0.96*h)),
-    }
+    # If calibration boxes exist, use them
+    boxes = _load_rock_boxes_from_config()
+    if boxes:
+        out = {}
+        for key, vals in boxes.items():
+            if not isinstance(vals, (list, tuple)) or len(vals) != 4:
+                continue
+            x1 = int(max(0.0, min(1.0, vals[0])) * w)
+            y1 = int(max(0.0, min(1.0, vals[1])) * h)
+            x2 = int(max(0.0, min(1.0, vals[2])) * w)
+            y2 = int(max(0.0, min(1.0, vals[3])) * h)
+            if x2 > x1 and y2 > y1:
+                out[key] = (x1, y1, x2, y2)
+        if out:
+            return out
+    return {}
 
 
 class UEXMarketError(Exception): pass
@@ -1729,6 +3715,219 @@ class RegionSelector:
             self.result = {"left":x1, "top":y1, "width":x2-x1, "height":y2-y1}
         self.win.destroy()
 
+class RockBoxWizard:
+    def __init__(self, parent, panel_region):
+        self.result = None
+        self.panel_region = panel_region
+        self._rect = None
+        self._start_x = self._start_y = 0
+        self._selection = None
+        self._step_idx = 0
+        self._boxes = {}
+        self._ready_for_calibration = False
+        self._steps = [
+            ("name", "Select NAME area"),
+            ("stats", "Select STATS area (MASS/RES/INST)"),
+            ("comp", "Select COMP area"),
+            ("table", "Select TABLE area (contents)"),
+            ("row", "Select ONE ROW height (any row)"),
+            ("percent", "Select % column"),
+            ("quality", "Select QUALITY column"),
+        ]
+        self._sample_entries = {}
+        self._row_entries = []
+        self._row_count = 3
+
+        with mss.mss() as sct:
+            raw = sct.grab(panel_region)
+            img = np.frombuffer(raw.bgra, dtype=np.uint8).reshape(raw.height, raw.width, 4)
+            self._img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+        self.win = tk.Toplevel(parent)
+        self.win.title("Rock Calibration")
+        self.win.configure(bg=BG)
+        self.win.attributes("-topmost", True)
+        self.win.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.win.bind("<Escape>", lambda e: self._cancel())
+
+        self.lbl_title = tk.Label(self.win, text="", bg=BG, fg=TEXT, font=f_alt(10, "bold"))
+        self.lbl_title.pack(padx=10, pady=(10, 4))
+
+        # Render image
+        h, w = self._img.shape[:2]
+        ok, buf = cv2.imencode(".png", cv2.cvtColor(self._img, cv2.COLOR_BGR2RGB))
+        data = base64.b64encode(buf).decode("ascii") if ok else ""
+        self._photo = tk.PhotoImage(data=data, format="PNG") if data else None
+        self.canvas = tk.Canvas(self.win, width=w, height=h, bg="#000000", highlightthickness=1, highlightbackground=BORDER, cursor="crosshair")
+        self.canvas.pack(padx=10, pady=6)
+        if self._photo:
+            self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+
+        btn_row = tk.Frame(self.win, bg=BG)
+        btn_row.pack(fill="x", padx=10, pady=(4, 10))
+        self.btn_reset = tk.Button(btn_row, text="Reset", bg=PANEL, fg=TEXT, relief="solid", bd=1,
+                                   highlightbackground=BORDER, font=f_alt(9), command=self._reset)
+        self.btn_reset.pack(side="left")
+        self.btn_run_cal = tk.Button(btn_row, text="Run Calibration", bg=GOLD, fg=BG, relief="solid", bd=1,
+                                     highlightbackground=BORDER, font=f_alt(9, "bold"), command=self._run_calibration, state="disabled")
+        self.btn_run_cal.pack(side="left", padx=(8, 0))
+        self.btn_confirm = tk.Button(btn_row, text="Confirm", bg=ACCENT, fg=BG, relief="solid", bd=1,
+                                     highlightbackground=BORDER, font=f_alt(9, "bold"), command=self._confirm)
+        self.btn_confirm.pack(side="right")
+
+        # Sample form
+        self.form = tk.Frame(self.win, bg=BG)
+        self.form.pack(fill="x", padx=10, pady=(4, 10))
+        self._build_sample_form()
+
+        self._update_title()
+        parent.wait_window(self.win)
+
+    def _build_sample_form(self):
+        for w in self.form.winfo_children():
+            w.destroy()
+        row = 0
+        def add_field(label, key, default=""):
+            nonlocal row
+            tk.Label(self.form, text=label, bg=BG, fg=TEXT, font=f_alt(8)).grid(row=row, column=0, sticky="w")
+            ent = tk.Entry(self.form, width=24, bg=PANEL, fg=TEXT, insertbackground=TEXT)
+            ent.insert(0, default)
+            ent.grid(row=row, column=1, padx=(6, 12), pady=2, sticky="w")
+            self._sample_entries[key] = ent
+            row += 1
+
+        add_field("Name", "name", "IRON (ORE)")
+        add_field("Mass", "mass", "1132")
+        add_field("Res", "res", "0%")
+        add_field("Inst", "inst", "1.32")
+        add_field("Comp", "comp", "1.48")
+
+        # Row count
+        tk.Label(self.form, text="Row count", bg=BG, fg=TEXT, font=f_alt(8)).grid(row=row, column=0, sticky="w")
+        self.row_count_var = tk.StringVar(value=str(self._row_count))
+        rc_ent = tk.Entry(self.form, textvariable=self.row_count_var, width=6, bg=PANEL, fg=TEXT, insertbackground=TEXT)
+        rc_ent.grid(row=row, column=1, padx=(6, 6), pady=2, sticky="w")
+        btn = tk.Button(self.form, text="Set Rows", bg=PANEL, fg=TEXT, relief="solid", bd=1,
+                        highlightbackground=BORDER, font=f_alt(8), command=self._set_rows)
+        btn.grid(row=row, column=1, padx=(70, 0), pady=2, sticky="w")
+        row += 1
+
+        # Rows
+        self._row_entries = []
+        for i in range(self._row_count):
+            tk.Label(self.form, text=f"Row {i+1} %", bg=BG, fg=TEXT, font=f_alt(8)).grid(row=row, column=0, sticky="w")
+            e_pct = tk.Entry(self.form, width=10, bg=PANEL, fg=TEXT, insertbackground=TEXT)
+            e_pct.grid(row=row, column=1, padx=(6, 12), pady=2, sticky="w")
+            row += 1
+            tk.Label(self.form, text=f"Row {i+1} Name", bg=BG, fg=TEXT, font=f_alt(8)).grid(row=row, column=0, sticky="w")
+            e_name = tk.Entry(self.form, width=24, bg=PANEL, fg=TEXT, insertbackground=TEXT)
+            e_name.grid(row=row, column=1, padx=(6, 12), pady=2, sticky="w")
+            row += 1
+            tk.Label(self.form, text=f"Row {i+1} Quality", bg=BG, fg=TEXT, font=f_alt(8)).grid(row=row, column=0, sticky="w")
+            e_q = tk.Entry(self.form, width=10, bg=PANEL, fg=TEXT, insertbackground=TEXT)
+            e_q.grid(row=row, column=1, padx=(6, 12), pady=2, sticky="w")
+            row += 1
+            self._row_entries.append((e_pct, e_name, e_q))
+
+    def _set_rows(self):
+        try:
+            n = int(self.row_count_var.get().strip())
+            self._row_count = max(1, min(12, n))
+        except Exception:
+            self._row_count = 3
+        self._build_sample_form()
+
+    def _collect_sample(self):
+        data = {}
+        for k, ent in self._sample_entries.items():
+            data[k] = ent.get().strip()
+        data["row_count"] = str(self._row_count)
+        for i, (e_pct, e_name, e_q) in enumerate(self._row_entries, 1):
+            data[f"row{i}_pct"] = e_pct.get().strip()
+            data[f"row{i}_name"] = e_name.get().strip()
+            data[f"row{i}_quality"] = e_q.get().strip()
+        return data
+
+    def _update_title(self):
+        key, label = self._steps[self._step_idx]
+        self.lbl_title.config(text=f"{label} ({self._step_idx + 1}/{len(self._steps)})")
+
+    def _on_press(self, e):
+        self._start_x, self._start_y = e.x, e.y
+        if self._rect: self.canvas.delete(self._rect)
+
+    def _on_drag(self, e):
+        if self._rect: self.canvas.delete(self._rect)
+        self._rect = self.canvas.create_rectangle(self._start_x, self._start_y, e.x, e.y, outline=ACCENT, width=2)
+
+    def _on_release(self, e):
+        x1 = min(self._start_x, e.x); y1 = min(self._start_y, e.y)
+        x2 = max(self._start_x, e.x); y2 = max(self._start_y, e.y)
+        if (x2 - x1) > 5 and (y2 - y1) > 5:
+            self._selection = (x1, y1, x2, y2)
+
+    def _reset(self):
+        if self._rect:
+            self.canvas.delete(self._rect)
+            self._rect = None
+        self._selection = None
+
+    def _confirm(self):
+        if not self._selection:
+            messagebox.showwarning("Calibration", "Please select a region first.")
+            return
+        h, w = self._img.shape[:2]
+        x1, y1, x2, y2 = self._selection
+        # Store normalized coords
+        key, _ = self._steps[self._step_idx]
+        self._boxes[key] = [x1 / w, y1 / h, x2 / w, y2 / h]
+        self._reset()
+        self._step_idx += 1
+        if self._step_idx >= len(self._steps):
+            self._ready_for_calibration = True
+            self.btn_run_cal.config(state="normal")
+            self.btn_confirm.config(state="disabled")
+            self.lbl_title.config(text="Ready to run calibration")
+            return
+        self._update_title()
+
+    def _run_calibration(self):
+        if not self._ready_for_calibration:
+            messagebox.showwarning("Calibration", "Please finish all box selections first.")
+            return
+        sample = self._collect_sample()
+        _save_sample_template(sample)
+        # Progress dialog for calibration runs
+        progress_win = tk.Toplevel(self.win)
+        progress_win.title("Calibrating OCR")
+        progress_win.configure(bg=BG)
+        progress_win.attributes("-topmost", True)
+        progress_win.geometry("+%d+%d" % (self.win.winfo_rootx() + 20, self.win.winfo_rooty() + 20))
+        lbl = tk.Label(progress_win, text="Starting calibration…", bg=BG, fg=TEXT, font=f_alt(9))
+        lbl.pack(padx=12, pady=12)
+
+        def _progress(field, engine, mode, scale):
+            try:
+                lbl.config(text=f"Calibrating {field} | {engine} | {mode} | x{scale}")
+                progress_win.update_idletasks()
+            except Exception:
+                pass
+
+        cal = _run_rock_calibration(self._img, self._boxes, sample, progress_cb=_progress)
+        try:
+            progress_win.destroy()
+        except Exception:
+            pass
+        self.result = {"panel": self.panel_region, "boxes": self._boxes, "sample": sample, "calibration": cal, "ai_prompt": AI_DEFAULT_PROMPT}
+        self.win.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.win.destroy()
+
 
 def _safe_widget_call(widget, fn):
     try:
@@ -1744,17 +3943,21 @@ class Menu:
         except Exception: self.mapping = None
 
         self.token_hidden = True
+        self.openai_key_hidden = True
         self.root = tk.Tk()
         self.market_enabled_var = tk.BooleanVar(master=self.root, value=load_market_enabled())
+        self.openai_enabled_var = tk.BooleanVar(master=self.root, value=load_ai_enabled())
+        self.ai_provider_var = tk.StringVar(master=self.root, value=load_ai_provider())
         self.history_duration_var = tk.StringVar(master=self.root, value=str(load_history_duration()))
         self.ocr_sensitivity_var = tk.StringVar(master=self.root, value=load_ocr_sensitivity())
         self.calibration_hotkey_var = tk.StringVar(master=self.root, value=load_calibration_hotkey())
+        self.openai_model_var = tk.StringVar(master=self.root, value=load_ai_model(self.ai_provider_var.get()))
         self.hotkeys = GlobalHotkeyManager()
         self.support_popup_shown_this_session = False
         self.root.title(f"{T('app_title')} {APP_VERSION_LABEL}")
         self.root.configure(bg=BG)
         self.root.resizable(False, False)
-        self.root.geometry("620x770")
+        self.root.geometry("620x840")
         self.root.attributes("-topmost", True)
         _load_icon(self.root)
 
@@ -1780,6 +3983,16 @@ class Menu:
             cb = tk.Checkbutton(self.mode_frame, text=mode_label(key), variable=var, bg=BG, fg=MODE_INFO[key]["color"], activebackground=BG, activeforeground=MODE_INFO[key]["color"], selectcolor=PANEL, font=f_alt(10), anchor="w")
             cb.pack(fill="x", padx=10, pady=2); self.mode_checkbuttons[key] = cb
 
+        btn_frame = tk.Frame(self.root, bg=BG); btn_frame.pack(fill="x", padx=16, pady=6)
+        self.btn_calibrate = tk.Button(btn_frame, text=T("calibrate_zone"), bg=PANEL, fg=ACCENT, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(11, "bold"), padx=12, pady=8, command=self.calibrate)
+        self.btn_calibrate.pack(fill="x", pady=4)
+        self.btn_calibrate_rock = tk.Button(btn_frame, text=T("calibrate_rock"), bg=PANEL, fg=TEXT, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(10, "bold"), padx=12, pady=8, command=self.calibrate_rock)
+        self.btn_calibrate_rock.pack(fill="x", pady=4)
+        self.btn_run_rock_cal = tk.Button(btn_frame, text=T("run_rock_calibration"), bg=GOLD, fg=BG, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(10, "bold"), padx=12, pady=8, command=self.run_rock_calibration, state="disabled")
+        self.btn_run_rock_cal.pack(fill="x", pady=4)
+        self.btn_start = tk.Button(btn_frame, text=T("start_system"), bg=ACCENT, fg=BG, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(11, "bold"), padx=12, pady=10, command=self.start)
+        self.btn_start.pack(fill="x", pady=4)
+
         self.uex_frame = tk.LabelFrame(self.root, text=T("uex_settings"), bg=BG, fg=TEXT, bd=1, font=f_ui(10, "bold"), relief="groove", highlightbackground=BORDER)
         self.uex_frame.pack(fill="x", padx=16, pady=(0,10))
         top_uex = tk.Frame(self.uex_frame, bg=BG); top_uex.pack(fill="x", padx=10, pady=(8,4))
@@ -1803,6 +4016,40 @@ class Menu:
         self.btn_test.pack(side="left", padx=(8,0))
         self.lbl_token_status = tk.Label(token_buttons, text="", bg=BG, fg=MUTED, font=f_alt(9))
         self.lbl_token_status.pack(side="left", padx=(12,0))
+
+        self.openai_frame = tk.LabelFrame(self.root, text=T("ai_settings"), bg=BG, fg=TEXT, bd=1, font=f_ui(10, "bold"), relief="groove", highlightbackground=BORDER)
+        self.openai_frame.pack(fill="x", padx=16, pady=(0,10))
+        top_openai = tk.Frame(self.openai_frame, bg=BG); top_openai.pack(fill="x", padx=10, pady=(8,4))
+        self.chk_openai = tk.Checkbutton(top_openai, text=T("ai_enable"), variable=self.openai_enabled_var, command=self._toggle_openai_enabled, bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT, selectcolor=PANEL, font=f_alt(10))
+        self.chk_openai.pack(side="left")
+
+        provider_row = tk.Frame(self.openai_frame, bg=BG); provider_row.pack(fill="x", padx=10, pady=(2,4))
+        self.lbl_ai_provider = tk.Label(provider_row, text=T("ai_provider"), bg=BG, fg=TEXT, font=f_alt(10, "bold")); self.lbl_ai_provider.pack(side="left")
+        self.ai_provider_menu = tk.OptionMenu(provider_row, self.ai_provider_var, *AI_PROVIDERS)
+        self.ai_provider_menu.config(bg=PANEL, fg=TEXT, activebackground=PANEL_2, activeforeground=TEXT, relief="flat", highlightthickness=0)
+        self.ai_provider_menu["menu"].config(bg=PANEL, fg=TEXT)
+        self.ai_provider_menu.pack(side="left", padx=8)
+        self._refresh_ai_provider_menu()
+        self.ai_provider_var.trace_add("write", lambda *args: self._on_ai_provider_change())
+
+        model_row = tk.Frame(self.openai_frame, bg=BG); model_row.pack(fill="x", padx=10, pady=(2,4))
+        self.lbl_openai_model = tk.Label(model_row, text=T("ai_model"), bg=BG, fg=TEXT, font=f_alt(10, "bold")); self.lbl_openai_model.pack(side="left")
+        self.entry_openai_model = tk.Entry(model_row, textvariable=self.openai_model_var, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="solid", bd=1, font=f_mono(10))
+        self.entry_openai_model.pack(side="left", fill="x", expand=True, padx=8)
+
+        key_row = tk.Frame(self.openai_frame, bg=BG); key_row.pack(fill="x", padx=10, pady=(2,4))
+        self.lbl_openai_key = tk.Label(key_row, text=T("ai_key"), bg=BG, fg=TEXT, font=f_alt(10, "bold")); self.lbl_openai_key.pack(side="left")
+        self.openai_key_var = tk.StringVar(master=self.root, value="")
+        self.entry_openai_key = tk.Entry(key_row, textvariable=self.openai_key_var, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="solid", bd=1, font=f_mono(10), show="*")
+        self.entry_openai_key.pack(side="left", fill="x", expand=True, padx=8)
+        self.btn_openai_show = tk.Button(key_row, text=T("show"), bg=PANEL, fg=TEXT, relief="solid", bd=1, highlightbackground=BORDER, font=f_alt(9), command=self.toggle_openai_key_visibility)
+        self.btn_openai_show.pack(side="left")
+
+        openai_buttons = tk.Frame(self.openai_frame, bg=BG); openai_buttons.pack(fill="x", padx=10, pady=(2,8))
+        self.btn_openai_save = tk.Button(openai_buttons, text=T("save"), bg=PANEL, fg=ACCENT, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(9, "bold"), command=self.save_openai_settings)
+        self.btn_openai_save.pack(side="left")
+        self.lbl_openai_status = tk.Label(openai_buttons, text="", bg=BG, fg=MUTED, font=f_alt(9))
+        self.lbl_openai_status.pack(side="left", padx=(12,0))
 
         history_row = tk.Frame(self.root, bg=BG)
         history_row.pack(fill="x", padx=16, pady=(0, 8))
@@ -1854,14 +4101,6 @@ class Menu:
         self.lbl_hotkey_status = tk.Label(hotkey_row, text="", bg=BG, fg=MUTED, font=f_alt(9))
         self.lbl_hotkey_status.pack(side="left", padx=(12, 0))
 
-        btn_frame = tk.Frame(self.root, bg=BG); btn_frame.pack(fill="x", padx=16, pady=6)
-        self.btn_calibrate = tk.Button(btn_frame, text=T("calibrate_zone"), bg=PANEL, fg=ACCENT, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(11, "bold"), padx=12, pady=8, command=self.calibrate)
-        self.btn_calibrate.pack(fill="x", pady=4)
-        self.btn_calibrate_rock = tk.Button(btn_frame, text=T("calibrate_rock"), bg=PANEL, fg=TEXT, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(10, "bold"), padx=12, pady=8, command=self.calibrate_rock)
-        self.btn_calibrate_rock.pack(fill="x", pady=4)
-        self.btn_start = tk.Button(btn_frame, text=T("start_system"), bg=ACCENT, fg=BG, relief="solid", bd=1, highlightbackground=BORDER, font=f_ui(11, "bold"), padx=12, pady=10, command=self.start)
-        self.btn_start.pack(fill="x", pady=4)
-
         extra_frame = tk.Frame(self.root, bg=BG); extra_frame.pack(fill="x", padx=16, pady=(6,6))
         self.btn_guide = tk.Button(extra_frame, text=T("guide"), bg=PANEL, fg=TEXT, relief="solid", bd=1, highlightbackground=BORDER, font=f_alt(10), command=self.show_guide)
         self.btn_guide.pack(side="left")
@@ -1873,7 +4112,7 @@ class Menu:
         self.status = tk.Label(self.root, text=status_text, bg=BG, fg=status_fg, font=f_alt(9)); self.status.pack(pady=(8,6))
         self.lbl_hint = tk.Label(self.root, text=T("calibration_hint"), bg=BG, fg=MUTED, font=f_alt(9), wraplength=560, justify="left"); self.lbl_hint.pack(padx=16, pady=(0,10))
 
-        self.refresh_token_status(); self._toggle_market_enabled()
+        self.refresh_token_status(); self._toggle_market_enabled(); self._toggle_openai_enabled(); self.refresh_openai_status(); self._refresh_run_cal_button()
         footer = tk.Frame(self.root, bg=BG); footer.pack(fill="x", pady=(4, 8), padx=16)
         tk.Label(footer, text=APP_VERSION_LABEL, bg=BG, fg=GOLD, font=f_alt(9, "bold")).pack(side="left", anchor="w")
         center_footer = tk.Frame(footer, bg=BG)
@@ -1895,6 +4134,64 @@ class Menu:
         except Exception:
             pass
         self.root.destroy()
+
+    def _refresh_run_cal_button(self):
+        try:
+            if _rock_calibration_ready():
+                self.btn_run_rock_cal.config(state="normal")
+            else:
+                self.btn_run_rock_cal.config(state="disabled")
+        except Exception:
+            pass
+
+    def run_rock_calibration(self):
+        if not _rock_calibration_ready():
+            messagebox.showwarning(T("calibrate_rock"), T("rock_missing_calibration"))
+            return
+        try:
+            payload = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                messagebox.showwarning(T("calibrate_rock"), T("rock_missing_calibration"))
+                return
+            panel_region = payload.get("panel")
+            boxes = payload.get("boxes")
+            sample = payload.get("sample", {})
+            if not panel_region or not boxes:
+                messagebox.showwarning(T("calibrate_rock"), T("rock_missing_calibration"))
+                return
+            # Capture panel image from screen
+            with mss.mss() as sct:
+                raw = sct.grab(panel_region)
+                img = np.frombuffer(raw.bgra, dtype=np.uint8).reshape(raw.height, raw.width, 4)
+                panel_img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+            # Run calibration with progress window
+            progress_win = tk.Toplevel(self.root)
+            progress_win.title("Calibrating OCR")
+            progress_win.configure(bg=BG)
+            progress_win.attributes("-topmost", True)
+            lbl = tk.Label(progress_win, text="Starting calibration…", bg=BG, fg=TEXT, font=f_alt(9))
+            lbl.pack(padx=12, pady=12)
+
+            def _progress(field, engine, mode, scale):
+                try:
+                    lbl.config(text=f"Calibrating {field} | {engine} | {mode} | x{scale}")
+                    progress_win.update_idletasks()
+                except Exception:
+                    pass
+
+            cal = _run_rock_calibration(panel_img, boxes, sample, progress_cb=_progress)
+            payload["calibration"] = cal
+            if not payload.get("ai_prompt"):
+                payload["ai_prompt"] = AI_DEFAULT_PROMPT
+            ROCK_CONFIG_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            try:
+                progress_win.destroy()
+            except Exception:
+                pass
+            messagebox.showinfo(T("calibrate_rock"), "Calibration complete.")
+        except Exception as e:
+            _ocr_log(f"[calibration] run error: {e}")
+            messagebox.showerror(T("calibrate_rock"), str(e))
 
     def _start_update_check(self):
         threading.Thread(target=self._check_for_updates_worker, daemon=True).start()
@@ -1937,24 +4234,43 @@ class Menu:
         for key, cb in self.mode_checkbuttons.items(): cb.config(text=mode_label(key))
         self.uex_frame.config(text=T("uex_settings")); self.chk_market.config(text=T("enable_market")); self.lbl_token.config(text=T("token"))
         self.btn_show.config(text=T("hide") if not self.token_hidden else T("show")); self.btn_save.config(text=T("save")); self.btn_test.config(text=T("test"))
+        self.openai_frame.config(text=T("ai_settings")); self.chk_openai.config(text=T("ai_enable"))
+        self.lbl_ai_provider.config(text=T("ai_provider")); self._refresh_ai_provider_menu()
+        self.lbl_openai_model.config(text=T("ai_model")); self.lbl_openai_key.config(text=T("ai_key"))
+        self.btn_openai_show.config(text=T("hide") if not self.openai_key_hidden else T("show")); self.btn_openai_save.config(text=T("save"))
         self.lbl_history_duration.config(text=T("history_duration")); self.btn_history_save.config(text=T("save"))
         self.lbl_ocr_sensitivity.config(text=T("ocr_sensitivity")); self.btn_ocr_save.config(text=T("save")); self.lbl_ocr_status.config(text=ocr_sensitivity_label(self.ocr_sensitivity_var.get()))
         self.lbl_preview_mode.config(text=T("preview_mode")); self._refresh_preview_menu()
         self.chk_verify.config(text=T("verify_candidates"))
         self.chk_rock_preview.config(text=T("rock_preview"))
         self.chk_rock_boxes.config(text=T("rock_boxes"))
-        self.lbl_rock_ocr_mode.config(text=T("rock_ocr_mode")); self._refresh_rock_ocr_menu()
+        self.chk_rock_quality_crop.config(text=T("rock_quality_crop"))
+        # Rock OCR mode selector removed (calibration determines per-field settings)
         self.lbl_rock_preview_zoom.config(text=T("rock_preview_zoom"))
         self.lbl_calibration_hotkey.config(text=T("calibration_hotkey")); self.btn_hotkey_save.config(text=T("save"))
-        self.btn_calibrate.config(text=T("calibrate_zone")); self.btn_calibrate_rock.config(text=T("calibrate_rock")); self.btn_start.config(text=T("start_system")); self.btn_guide.config(text=T("guide")); self.btn_donate.config(text=T("donate"))
+        self.btn_calibrate.config(text=T("calibrate_zone")); self.btn_calibrate_rock.config(text=T("calibrate_rock")); self.btn_run_rock_cal.config(text=T("run_rock_calibration")); self.btn_start.config(text=T("start_system")); self.btn_guide.config(text=T("guide")); self.btn_donate.config(text=T("donate"))
         status_text = T("csv_loaded") if self.mapping else T("csv_error"); status_fg = GREEN if self.mapping else RED
-        self.status.config(text=status_text, fg=status_fg); self.lbl_hint.config(text=T("calibration_hint")); self.refresh_token_status()
+        self.status.config(text=status_text, fg=status_fg); self.lbl_hint.config(text=T("calibration_hint")); self.refresh_token_status(); self.refresh_openai_status()
 
     def _toggle_market_enabled(self):
         enabled = self.market_enabled_var.get(); save_market_enabled(enabled)
         state = "normal" if enabled else "disabled"
         self.entry_token.config(state=state); self.btn_show.config(state=state); self.btn_save.config(state=state); self.btn_test.config(state=state); self.btn_help.config(state=state)
         self.refresh_token_status()
+
+    def _toggle_openai_enabled(self):
+        enabled = self.openai_enabled_var.get()
+        save_ai_enabled(enabled)
+        self._set_openai_controls_state()
+        self.refresh_openai_status()
+
+    def _set_openai_controls_state(self):
+        state = "normal" if self.openai_enabled_var.get() else "disabled"
+        self.entry_openai_key.config(state=state)
+        self.btn_openai_show.config(state=state)
+        self.btn_openai_save.config(state=state)
+        self.entry_openai_model.config(state=state)
+        self.ai_provider_menu.config(state=state)
 
     def _preview_label(self, mode):
         if mode == "raw": return T("preview_raw")
@@ -1967,6 +4283,19 @@ class Menu:
         for mode in PREVIEW_MODES:
             menu.add_command(label=self._preview_label(mode), command=lambda m=mode: self.preview_mode_var.set(m))
 
+    def _refresh_ai_provider_menu(self):
+        menu = self.ai_provider_menu["menu"]
+        menu.delete(0, "end")
+        for key in AI_PROVIDERS:
+            label = AI_PROVIDER_LABELS.get(key, key)
+            menu.add_command(label=label, command=lambda k=key: self.ai_provider_var.set(k))
+
+    def _on_ai_provider_change(self):
+        provider = self.ai_provider_var.get().strip().lower()
+        save_ai_provider(provider)
+        self.openai_model_var.set(load_ai_model(provider))
+        self.refresh_openai_status()
+
     def _set_preview_mode(self, mode):
         save_preview_mode(mode)
 
@@ -1976,13 +4305,49 @@ class Menu:
         if token: self.lbl_token_status.config(text=T("token_saved"), fg=GREEN)
         else: self.lbl_token_status.config(text=T("token_not_set"), fg=MUTED)
 
+    def refresh_openai_status(self):
+        if not self.openai_enabled_var.get():
+            self.lbl_openai_status.config(text=T("ai_not_set"), fg=MUTED)
+            return
+        provider = self.ai_provider_var.get().strip().lower()
+        key = _get_ai_api_key(provider)
+        if key:
+            status = T("ai_saved")
+            fg = GREEN
+        else:
+            status = T("ai_not_set")
+            fg = MUTED
+        if keyring is None:
+            status = f"{status} | {T('ai_keyring_missing')}"
+            if key:
+                fg = GOLD
+        label = AI_PROVIDER_LABELS.get(provider, provider)
+        status = f"{label}: {status}"
+        self.lbl_openai_status.config(text=status, fg=fg)
+
     def toggle_token_visibility(self):
         self.token_hidden = not self.token_hidden
         self.entry_token.config(show="*" if self.token_hidden else "")
         self.btn_show.config(text=T("hide") if not self.token_hidden else T("show"))
 
+    def toggle_openai_key_visibility(self):
+        self.openai_key_hidden = not self.openai_key_hidden
+        self.entry_openai_key.config(show="*" if self.openai_key_hidden else "")
+        self.btn_openai_show.config(text=T("hide") if not self.openai_key_hidden else T("show"))
+
     def save_token(self):
         save_uex_token(self.token_var.get().strip()); self.refresh_token_status()
+
+    def save_openai_settings(self):
+        provider = self.ai_provider_var.get().strip().lower()
+        save_ai_enabled(self.openai_enabled_var.get())
+        save_ai_provider(provider)
+        save_ai_model(provider, self.openai_model_var.get().strip())
+        key = self.openai_key_var.get().strip()
+        if key:
+            _save_ai_api_key(provider, key)
+            self.openai_key_var.set("")
+        self.refresh_openai_status()
 
     def test_token(self):
         token = self.token_var.get().strip()
@@ -2153,7 +4518,15 @@ class Menu:
         try:
             selector = RegionSelector(self.root)
             if selector.result:
-                ROCK_CONFIG_FILE.write_text(json.dumps(selector.result, indent=2), encoding="utf-8")
+                wizard = RockBoxWizard(self.root, selector.result)
+                if wizard.result:
+                    try:
+                        if isinstance(wizard.result, dict) and wizard.result.get("sample"):
+                            global SAMPLE_TEMPLATE
+                            SAMPLE_TEMPLATE = dict(wizard.result.get("sample") or {})
+                    except Exception:
+                        pass
+                    ROCK_CONFIG_FILE.write_text(json.dumps(wizard.result, indent=2), encoding="utf-8")
                 self.status.config(text=T("csv_loaded") if self.mapping else T("csv_error"), fg=GREEN if self.mapping else RED)
         except Exception as e:
             messagebox.showerror(T("calibrate_rock"), str(e))
@@ -2170,7 +4543,7 @@ class Menu:
         if not self.mapping: messagebox.showerror("Error", T("csv_error")); return
         if not CONFIG_FILE.exists(): messagebox.showwarning(T("calibrate_zone"), T("calibration_hint")); return
         modes = self.get_selected_modes(); save_selected_modes(modes)
-        if "rock" in modes and not ROCK_CONFIG_FILE.exists():
+        if "rock" in modes and not _rock_calibration_ready():
             messagebox.showwarning(T("calibrate_rock"), T("rock_missing_calibration")); return
         region = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         self.hotkeys.stop()
@@ -2178,7 +4551,8 @@ class Menu:
         try:
             rock_region = None
             if ROCK_CONFIG_FILE.exists():
-                rock_region = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+                payload = json.loads(ROCK_CONFIG_FILE.read_text(encoding="utf-8"))
+                rock_region = payload.get("panel") if isinstance(payload, dict) and payload.get("panel") else payload
             App(region, self.mapping, modes, rock_region)
         except Exception as e:
             _ocr_log(f"[overlay] failed to start: {e}")
@@ -2189,7 +4563,29 @@ class App:
     def _ui_after(self, delay_ms, fn):
         try:
             if self.running and self.root is not None and int(self.root.winfo_exists()) == 1:
-                self.root.after(delay_ms, fn)
+                holder = {"id": None}
+                def _wrapped():
+                    try:
+                        if holder["id"] is not None:
+                            self._after_ids.discard(holder["id"])
+                    except Exception:
+                        pass
+                    fn()
+                holder["id"] = self.root.after(delay_ms, _wrapped)
+                self._after_ids.add(holder["id"])
+        except Exception:
+            pass
+
+    def _cancel_afters(self):
+        try:
+            if self.root is None:
+                return
+            for aid in list(self._after_ids):
+                try:
+                    self.root.after_cancel(aid)
+                except Exception:
+                    pass
+            self._after_ids.clear()
         except Exception:
             pass
 
@@ -2375,21 +4771,12 @@ class App:
         self.rock_boxes_enabled = bool(self.rock_boxes_var.get())
         save_rock_boxes_enabled(self.rock_boxes_enabled)
 
+    def _toggle_rock_quality_crop_enabled(self):
+        self.rock_quality_crop_enabled = bool(self.rock_quality_crop_var.get())
+        save_rock_quality_crop_enabled(self.rock_quality_crop_enabled)
+
     def _rock_ocr_label(self, mode):
-        if mode == "bright": return T("rock_ocr_bright")
-        if mode == "adaptive": return T("rock_ocr_adaptive")
-        if mode == "color": return T("rock_ocr_color")
-        return T("rock_ocr_gray")
-
-    def _refresh_rock_ocr_menu(self):
-        menu = self.rock_ocr_menu["menu"]
-        menu.delete(0, "end")
-        for mode in ROCK_OCR_MODES:
-            menu.add_command(label=self._rock_ocr_label(mode), command=lambda m=mode: self.rock_ocr_mode_var.set(m))
-
-    def _set_rock_ocr_mode(self, mode):
-        self.rock_ocr_mode = mode if mode in ROCK_OCR_MODES else "gray"
-        save_rock_ocr_mode(self.rock_ocr_mode)
+        return
 
     def _set_rock_preview_zoom(self, value):
         try:
@@ -2441,21 +4828,99 @@ class App:
             if cur_h != target_h:
                 self.rock_preview_frame.config(height=target_h)
             display_img = img
-            if self.rock_ocr_mode != "gray":
-                display_img = _rock_preprocess_preview(img, self.rock_ocr_mode)
-                if len(display_img.shape) == 2:
-                    display_img = cv2.cvtColor(display_img, cv2.COLOR_GRAY2BGR)
+            # Optionally show just the quality crop
+            if self.rock_quality_crop_enabled:
+                try:
+                    tb = rock_boxes_for_shape(h, w).get("table")
+                    if tb:
+                        tx1, ty1, tx2, ty2 = tb
+                        tw = tx2 - tx1
+                        qw = max(1, int(tw * 0.35))
+                        q1 = max(tx1, tx2 - qw)
+                        display_img = display_img[ty1:ty2, q1:tx2]
+                except Exception:
+                    pass
+            colors = {
+                "header": (255, 0, 0),
+                "name": (0, 255, 0),
+                "stats": (0, 128, 255),
+                "comp": (255, 0, 255),
+                "table": (0, 255, 255),
+                "col_pct": (255, 200, 0),
+                "col_name": (0, 255, 150),
+                "col_quality": (200, 0, 255),
+                "qual_box": (255, 255, 255),
+                "row_band": (120, 255, 120),
+            }
             if self.rock_boxes_enabled:
-                colors = {
-                    "header": (255, 0, 0),
-                    "name": (0, 255, 0),
-                    "stats": (0, 128, 255),
-                    "comp": (255, 0, 255),
-                    "table": (0, 255, 255),
-                }
                 for key, (x1, y1, x2, y2) in rock_boxes_for_shape(h, w).items():
                     color = colors.get(key, (0, 255, 255))
                     cv2.rectangle(display_img, (x1, y1), (x2, y2), color, 1)
+            # Column guides + row bands inside table area (always show bands)
+            tb = rock_boxes_for_shape(h, w).get("table")
+            if tb:
+                tx1, ty1, tx2, ty2 = tb
+                tw = tx2 - tx1
+                th = ty2 - ty1
+                # Percent column ~ left 22% (widened for 2-digit percent)
+                p1 = tx1
+                p2 = int(tx1 + tw * 0.22)
+                # Name column ~ middle 57%
+                n1 = p2
+                n2 = int(tx1 + tw * 0.75)
+                # Quality column ~ right 25%
+                q1 = n2
+                q2 = tx2
+                if self.rock_boxes_enabled:
+                    cv2.rectangle(display_img, (p1, ty1), (p2, ty2), colors["col_pct"], 1)
+                    cv2.rectangle(display_img, (n1, ty1), (n2, ty2), colors["col_name"], 1)
+                    cv2.rectangle(display_img, (q1, ty1), (q2, ty2), colors["col_quality"], 1)
+                # Row band overlay using projection segmentation
+                try:
+                    table_img = display_img[ty1:ty2, tx1:tx2]
+                    row_segments = _segment_table_rows_by_projection(table_img, "gray") if AUTO_CONTENT_ROWS else []
+                    if not row_segments:
+                        try:
+                            boxes = rock_boxes_for_shape(h, w)
+                            row_box = boxes.get("row")
+                            if row_box:
+                                _, ry1, _, ry2 = row_box
+                                row_h = max(6, int(ry2 - ry1))
+                                est = max(1, int((th + row_h - 1) / row_h))
+                                row_segments = [(i * row_h, min(th, (i + 1) * row_h)) for i in range(est)]
+                        except Exception:
+                            row_segments = []
+                    if not row_segments and th > 0:
+                        # Last resort: draw 3 equal bands so user can see alignment
+                        est = 3
+                        row_h = max(6, int(th / est))
+                        row_segments = [(i * row_h, min(th, (i + 1) * row_h)) for i in range(est)]
+                    if self.rock_boxes_enabled and hasattr(self, "_last_row_overlay") is False:
+                        self._last_row_overlay = 0
+                    if getattr(self, "_last_row_overlay", 0) == 0:
+                        _ocr_log(f"[rock_rows_overlay] table={tx1},{ty1},{tx2},{ty2} segments={len(row_segments)}")
+                        self._last_row_overlay = 1
+                    for y0, y1 in row_segments:
+                        cv2.rectangle(display_img, (tx1, ty1 + y0), (tx2, ty1 + y1), colors["row_band"], 1)
+                except Exception:
+                    pass
+                # Debug: draw boxes in quality column (green for digits, white for other chars)
+                if self.rock_boxes_enabled:
+                    try:
+                        q_crop = display_img[ty1:ty2, q1:q2]
+                        proc = cv2.cvtColor(q_crop, cv2.COLOR_BGR2GRAY)
+                        data = pytesseract.image_to_data(proc, config="--psm 7", output_type=_TESS_OUTPUT.DICT)
+                        n = len(data.get("text", []))
+                        for i in range(n):
+                            txt = (data["text"][i] or "").strip()
+                            if not txt:
+                                continue
+                            x = data["left"][i]; y = data["top"][i]; w2 = data["width"][i]; h2 = data["height"][i]
+                            has_digit = any(ch.isdigit() for ch in txt)
+                            color = (0, 255, 0) if has_digit else (255, 255, 255)
+                            cv2.rectangle(display_img, (q1 + x, ty1 + y), (q1 + x + w2, ty1 + y + h2), color, 1)
+                    except Exception:
+                        pass
             # Render at preview zoom
             if self.rock_preview_zoom != 1.0:
                 display_img = cv2.resize(display_img, (max(1, int(w * self.rock_preview_zoom)), max(1, int(h * self.rock_preview_zoom))), interpolation=cv2.INTER_NEAREST)
@@ -2519,13 +4984,19 @@ class App:
         self.rock_data = None
         self.rock_last_update = 0
         self._rock_last_ts = 0.0
+        self._rock_table_hash = ""
         self.rock_preview_enabled = load_rock_preview_enabled()
         self.rock_boxes_enabled = load_rock_boxes_enabled()
-        self.rock_ocr_mode = load_rock_ocr_mode()
+        self.rock_ocr_mode = "gray"
         self.rock_preview_zoom = load_rock_preview_zoom()
+        self.rock_quality_crop_enabled = load_rock_quality_crop_enabled()
         self._rock_preview_photo = None
         self.market_enabled = load_market_enabled(); self.market_client = UEXMarketClient(token=load_uex_token()); self.market_request_id = 0; self.current_market_material = None; self.current_market_kind = None
         self.hotkeys = GlobalHotkeyManager()
+        self._last_rock_ocr_mode_logged = None
+        self._after_ids = set()
+
+        self._last_ocr_engine = None
 
         self.root = tk.Tk(); self.root.title(T("app_title")); self.root.configure(bg=BG); self.root.attributes("-topmost", True); self.root.geometry(load_overlay_geometry()); self.root.overrideredirect(True); _load_icon(self.root)
         try: self.root.attributes("-alpha", 0.85)
@@ -2568,15 +5039,10 @@ class App:
         self.rock_boxes_var = tk.BooleanVar(value=self.rock_boxes_enabled)
         self.chk_rock_boxes = tk.Checkbutton(verify_row, text=T("rock_boxes"), variable=self.rock_boxes_var, command=self._toggle_rock_boxes_enabled, bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT, selectcolor=PANEL, font=f_alt(9))
         self.chk_rock_boxes.pack(side="left", padx=(10,0))
-        self.lbl_rock_ocr_mode = tk.Label(verify_row, text=T("rock_ocr_mode"), bg=BG, fg=TEXT, font=f_alt(9, "bold"))
-        self.lbl_rock_ocr_mode.pack(side="left", padx=(12,4))
-        self.rock_ocr_mode_var = tk.StringVar(value=self.rock_ocr_mode)
-        self.rock_ocr_menu = tk.OptionMenu(verify_row, self.rock_ocr_mode_var, *ROCK_OCR_MODES)
-        self.rock_ocr_menu.config(bg=PANEL, fg=TEXT, activebackground=PANEL_2, activeforeground=TEXT, relief="flat", highlightthickness=0)
-        self.rock_ocr_menu["menu"].config(bg=PANEL, fg=TEXT)
-        self.rock_ocr_menu.pack(side="left")
-        self._refresh_rock_ocr_menu()
-        self.rock_ocr_mode_var.trace_add("write", lambda *args: self._set_rock_ocr_mode(self.rock_ocr_mode_var.get()))
+        self.rock_quality_crop_var = tk.BooleanVar(value=self.rock_quality_crop_enabled)
+        self.chk_rock_quality_crop = tk.Checkbutton(verify_row, text=T("rock_quality_crop"), variable=self.rock_quality_crop_var, command=self._toggle_rock_quality_crop_enabled, bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT, selectcolor=PANEL, font=f_alt(9))
+        self.chk_rock_quality_crop.pack(side="left", padx=(10,0))
+        # Rock OCR mode selector removed (calibration determines per-field OCR)
         self.lbl_rock_preview_zoom = tk.Label(verify_row, text=T("rock_preview_zoom"), bg=BG, fg=TEXT, font=f_alt(9, "bold"))
         self.lbl_rock_preview_zoom.pack(side="left", padx=(12,4))
         self.rock_preview_zoom_var = tk.DoubleVar(value=self.rock_preview_zoom)
@@ -2617,6 +5083,9 @@ class App:
         self.info_label = tk.Label(self.root, text=T("scanning"), bg=BG, fg=MUTED, font=f_alt(9), anchor="w", justify="left"); self.info_label.pack(fill="x", padx=8, pady=(0,2))
         self.verify_label = tk.Label(self.root, text="", bg=BG, fg=MUTED, font=f_mono(8), anchor="w", justify="left", wraplength=680)
         self.verify_label.pack(fill="x", padx=8, pady=(0,2))
+
+        self.ocr_mode_label = tk.Label(self.root, text=T("ocr_mode_fast"), bg=BG, fg=MUTED, font=f_alt(8), anchor="w")
+        self.ocr_mode_label.pack(fill="x", padx=8, pady=(0,4))
 
         self.rock_frame = tk.Frame(self.root, bg=BG)
         self.rock_frame.pack(fill="x", padx=8, pady=(0,4))
@@ -2773,6 +5242,7 @@ class App:
         except Exception: pass
         try: save_overlay_geometry(self.root.geometry())
         except Exception: pass
+        self._cancel_afters()
         try: self.root.destroy()
         except Exception: pass
         self.root = None
@@ -2783,6 +5253,7 @@ class App:
         except Exception: pass
         try: save_overlay_geometry(self.root.geometry())
         except Exception: pass
+        self._cancel_afters()
         try: self.root.destroy()
         except Exception: pass
         self.root = None
@@ -3142,10 +5613,18 @@ class App:
                     now = time.time()
                     if now - self._rock_last_ts >= 0.6:
                         self._rock_last_ts = now
+                        global _CURRENT_ROCK_MODE
+                        _CURRENT_ROCK_MODE = "calibrated"
+                        if self.rock_data and (now - self.rock_last_update) < self.history_duration:
+                            continue
                         rock_img = capture_region(self.rock_region)
                         if self.rock_preview_enabled:
                             self._ui_call(lambda im=rock_img.copy(): _safe_widget_call(self.rock_preview_label, lambda: self._render_rock_preview(im)))
-                        rock_data, _ = parse_rock_details(rock_img, self.rock_ocr_mode)
+                        table_hash = _rock_table_hash(rock_img)
+                        if table_hash and table_hash == self._rock_table_hash:
+                            continue
+                        self._rock_table_hash = table_hash or self._rock_table_hash
+                        rock_data, _ = parse_rock_details(rock_img, "gray")
                         self._maybe_update_rock(rock_data)
                 raw, raw_candidates, validated = _read_number_internal(img, self.lookup, self.active_modes)
                 if self.verify_enabled:
@@ -3154,6 +5633,13 @@ class App:
                     self._ui_call(lambda r=raw_set, v=val_set: _safe_widget_call(self.verify_label, lambda: self.verify_label.config(text=f"OCR raw: {r}  |  valid: {v}")))
                 else:
                     self._ui_call(lambda: _safe_widget_call(self.verify_label, lambda: self.verify_label.config(text="")))
+                engine = LAST_OCR_ENGINE
+                if engine != self._last_ocr_engine:
+                    self._last_ocr_engine = engine
+                    if engine == "paddle":
+                        self._ui_call(lambda: _safe_widget_call(self.ocr_mode_label, lambda: self.ocr_mode_label.config(text=T("ocr_mode_high"), fg=GOLD)))
+                    else:
+                        self._ui_call(lambda: _safe_widget_call(self.ocr_mode_label, lambda: self.ocr_mode_label.config(text=T("ocr_mode_fast"), fg=MUTED)))
                 self.history.append(raw)
                 if len(self.history) > HISTORY_SIZE: self.history.pop(0)
                 valid = [v for v in self.history if v is not None]

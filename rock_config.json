@@ -1,6 +1,110 @@
 {
-  "left": 667,
-  "top": 793,
-  "width": 145,
-  "height": 269
+  "panel": {
+    "left": 1163,
+    "top": 810,
+    "width": 143,
+    "height": 263
+  },
+  "boxes": {
+    "name": [
+      0.006993006993006993,
+      0.034220532319391636,
+      0.6573426573426573,
+      0.08745247148288973
+    ],
+    "stats": [
+      0.4755244755244755,
+      0.08745247148288973,
+      0.7412587412587412,
+      0.2623574144486692
+    ],
+    "comp": [
+      0.5174825174825175,
+      0.3650190114068441,
+      0.8391608391608392,
+      0.4220532319391635
+    ],
+    "table": [
+      0.006993006993006993,
+      0.4752851711026616,
+      0.986013986013986,
+      1.0
+    ],
+    "row": [
+      0.006993006993006993,
+      0.49049429657794674,
+      0.9790209790209791,
+      0.5361216730038023
+    ],
+    "percent": [
+      0.02097902097902098,
+      0.4866920152091255,
+      0.2517482517482518,
+      0.6425855513307985
+    ],
+    "quality": [
+      0.8041958041958042,
+      0.4866920152091255,
+      0.972027972027972,
+      0.6463878326996197
+    ]
+  },
+  "sample": {
+    "name": "IRON (ORE)",
+    "mass": "1132",
+    "res": "0%",
+    "inst": "1.32",
+    "comp": "1.48",
+    "row_count": "1",
+    "row1_pct": "",
+    "row1_name": "",
+    "row1_quality": ""
+  },
+  "calibration": {
+    "name": {
+      "score": 0.9473684210526315,
+      "engine": "tesseract",
+      "mode": "color",
+      "scale": 1.5,
+      "text": "IRON(ORE)"
+    },
+    "stats": {
+      "score": 0.9565217391304348,
+      "engine": "tesseract",
+      "mode": "gray",
+      "scale": 2.0,
+      "text": "1132 % 1.32"
+    },
+    "comp": {
+      "score": 0.5714285714285714,
+      "engine": "tesseract",
+      "mode": "gray",
+      "scale": 1.0,
+      "text": "146"
+    },
+    "row_name_1": {
+      "score": 0.0,
+      "engine": "tesseract",
+      "mode": "gray",
+      "scale": 1.0,
+      "text": ""
+    },
+    "percent_row_1": {
+      "score": 0.0,
+      "engine": "tesseract",
+      "mode": "gray",
+      "scale": 1.0,
+      "text": "SS"
+    },
+    "quality_row_1": {
+      "score": 0.0,
+      "engine": "tesseract",
+      "mode": "gray",
+      "scale": 1.0,
+      "text": ""
+    }
+  },
+  "openai_prompt": "You are reading the Star Citizen mining HUD contents list.\nReturn JSON only in this exact shape:\n{\"rows\":[{\"pct\":\"5.42\",\"name\":\"IRON (ORE)\",\"quality\":\"543\"}]}\nRules:\n- pct is numeric without %\n- name is the material name as seen\n- quality is the right-column number\n- keep top-to-bottom order\n- if nothing is found, return {\"rows\":[]}\n"
+  ,
+  "ai_prompt": "You are reading the Star Citizen mining HUD contents list.\nReturn JSON only in this exact shape:\n{\"rows\":[{\"pct\":\"5.42\",\"name\":\"IRON (ORE)\",\"quality\":\"543\"}]}\nRules:\n- pct is numeric without %\n- name is the material name as seen\n- quality is the right-column number\n- keep top-to-bottom order\n- if nothing is found, return {\"rows\":[]}\n"
 }

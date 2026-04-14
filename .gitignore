@@ -1,5 +1,6 @@
 build/
 output/
+paddle_debug/
 *.exe
 __pycache__/
 tesseract/
@@ -7,3 +8,4 @@ config.json
 preferences.json
 *.log
 *.sqlite3
+ocr_sample_template.csv
